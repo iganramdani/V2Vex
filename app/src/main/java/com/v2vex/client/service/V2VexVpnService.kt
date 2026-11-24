@@ -128,22 +128,20 @@ class V2VexVpnService : VpnService() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 app.coreManager.ensureBundledGeoAssets()
-                val chainProfile = app.repository.getProfileById(settings.chainProfileId)
-                val configJson = XrayConfigGenerator.generate(
-                    profile = profile,
-                    settings = settings,
-                    hasGeoIp = app.coreManager.hasGeoIp(),
-                    hasGeoSite = app.coreManager.hasGeoSite(),
-                    chainProfile = chainProfile
-                )
+                val useSingBox = shouldUseSingBox(profile, settings)
+                val configJson = buildEngineConfig(app, profile, settings, useSingBox)
                 LogBuffer.i(
                     "VPN",
-                    "Config ready (${configJson.length}B) | node='${profile.name}' (${profile.shortBadge()}) | routing=${settings.routingPreset} | frag=${settings.fragment.enabled} | mux=${settings.mux.enabled} | chain=${chainProfile?.name ?: "none"}"
+                    "Config ready (${configJson.length}B) | engine=${if (useSingBox) "Sing-box" else "Xray"} | node='${profile.name}' (${profile.shortBadge()}) | routing=${settings.routingPreset} | frag=${settings.fragment.enabled} | mux=${settings.mux.enabled} | failover=${settings.enableAutoFailover}"
                 )
 
-                // 1. Launch & verify Xray-core is genuinely alive
-                val (coreStarted, coreStatus) = xrayProcess?.start(configJson, serviceScope) { exitCode ->
-                    stopTunnel("Xray-core crashed (exit $exitCode)")
+                // 1. Launch & verify selected core engine is genuinely alive
+                val (coreStarted, coreStatus) = xrayProcess?.start(
+                    configJson = configJson,
+                    scope = serviceScope,
+                    useSingBox = useSingBox
+                ) { exitCode ->
+                    stopTunnel("Core engine crashed (exit $exitCode)")
                 } ?: (false to "Core manager unavailable")
 
                 if (!coreStarted) {
@@ -182,6 +180,40 @@ class V2VexVpnService : VpnService() {
         }
     }
 
+    private fun shouldUseSingBox(profile: ServerProfile, settings: AppSettings): Boolean = when (settings.coreEngine) {
+        com.v2vex.client.model.CoreEnginePreference.SING_BOX -> true
+        com.v2vex.client.model.CoreEnginePreference.XRAY -> false
+        com.v2vex.client.model.CoreEnginePreference.AUTO ->
+            profile.protocol == com.v2vex.client.model.ProxyProtocol.HYSTERIA2 ||
+                profile.protocol == com.v2vex.client.model.ProxyProtocol.TUIC
+    }
+
+    private fun buildEngineConfig(
+        app: V2VexApp,
+        profile: ServerProfile,
+        settings: AppSettings,
+        useSingBox: Boolean
+    ): String {
+        if (useSingBox) {
+            return com.v2vex.client.core.SingBoxConfigGenerator.generate(profile, settings)
+        }
+        val chainProfile = app.repository.getProfileById(settings.chainProfileId)
+        val failovers = if (settings.enableAutoFailover) {
+            val selectedIds = settings.failoverNodeIds.toSet()
+            val all = app.repository.profiles.value
+            if (selectedIds.isNotEmpty()) all.filter { it.id in selectedIds } else all.take(4)
+        } else emptyList()
+
+        return XrayConfigGenerator.generate(
+            profile = profile,
+            settings = settings,
+            hasGeoIp = app.coreManager.hasGeoIp(),
+            hasGeoSite = app.coreManager.hasGeoSite(),
+            chainProfile = chainProfile,
+            failoverProfiles = failovers
+        )
+    }
+
     private fun reloadCoreOnly() {
         val app = application as V2VexApp
         val profile = app.repository.getSelectedProfile() ?: return
@@ -189,16 +221,14 @@ class V2VexVpnService : VpnService() {
 
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val chainProfile = app.repository.getProfileById(settings.chainProfileId)
-                val configJson = XrayConfigGenerator.generate(
-                    profile = profile,
-                    settings = settings,
-                    hasGeoIp = app.coreManager.hasGeoIp(),
-                    hasGeoSite = app.coreManager.hasGeoSite(),
-                    chainProfile = chainProfile
-                )
-                val (ok, coreStatus) = xrayProcess?.start(configJson, serviceScope) { exitCode ->
-                    stopTunnel("Xray-core crashed (exit $exitCode)")
+                val useSingBox = shouldUseSingBox(profile, settings)
+                val configJson = buildEngineConfig(app, profile, settings, useSingBox)
+                val (ok, coreStatus) = xrayProcess?.start(
+                    configJson = configJson,
+                    scope = serviceScope,
+                    useSingBox = useSingBox
+                ) { exitCode ->
+                    stopTunnel("Core engine crashed (exit $exitCode)")
                 } ?: (false to "Core error")
 
                 if (ok) {
@@ -208,7 +238,7 @@ class V2VexVpnService : VpnService() {
                         badge = profile.shortBadge(),
                         coreMode = "$coreStatus · L3 TUN"
                     )
-                    LogBuffer.i("VPN", "Hot-reloaded Xray-core for '${profile.name}' (logLevel=${settings.logLevel})")
+                    LogBuffer.i("VPN", "Hot-reloaded ${if (useSingBox) "Sing-box" else "Xray-core"} for '${profile.name}' (logLevel=${settings.logLevel})")
                 } else {
                     stopTunnel(coreStatus)
                 }

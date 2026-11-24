@@ -90,4 +90,40 @@ class UriParserTest {
         assertEquals("sub-1", profiles[0].subscriptionId)
         assertEquals("NodeB", profiles[1].name)
     }
+
+    @Test
+    fun parseHysteria2AndTuicUris() {
+        val hy2 = UriParser.parseSingle("hysteria2://my-secret@hy2.example.com:8443?sni=hy2.example.com&obfs=salamander&obfs-password=obfspass#SG-Hy2")
+        assertNotNull(hy2)
+        assertEquals(ProxyProtocol.HYSTERIA2, hy2!!.protocol)
+        assertEquals("my-secret", hy2.uuidOrPassword)
+        assertEquals("salamander", hy2.obfsType)
+        assertEquals("obfspass", hy2.obfsPassword)
+
+        val tuic = UriParser.parseSingle("tuic://11111111-2222-3333-4444-555555555555:tuicpass@tuic.example.com:443?sni=tuic.example.com&congestion_control=bbr#JP-TUIC")
+        assertNotNull(tuic)
+        assertEquals(ProxyProtocol.TUIC, tuic!!.protocol)
+        assertEquals("tuicpass", tuic.uuidOrPassword)
+        assertEquals("bbr", tuic.congestionControl)
+    }
+
+    @Test
+    fun parseClashYamlAndSingBoxJson() {
+        val clash = """
+            proxies:
+              - { name: "Clash-VLESS", type: vless, server: c1.example.com, port: 443, uuid: "abc-123", tls: true, servername: c1.example.com }
+              - { name: "Clash-Hy2", type: hysteria2, server: c2.example.com, port: 8443, password: "pw2", sni: c2.example.com }
+        """.trimIndent()
+        val clashProfiles = UriParser.parseBatch(clash)
+        assertEquals(2, clashProfiles.size)
+        assertEquals(ProxyProtocol.VLESS, clashProfiles[0].protocol)
+        assertEquals(ProxyProtocol.HYSTERIA2, clashProfiles[1].protocol)
+
+        val sbJson = com.v2vex.client.core.SingBoxConfigGenerator.generate(
+            clashProfiles[1],
+            com.v2vex.client.model.AppSettings()
+        )
+        assertTrue(sbJson.contains("\"type\": \"hysteria2\""))
+        assertTrue(sbJson.contains("c2.example.com"))
+    }
 }

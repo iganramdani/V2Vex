@@ -36,11 +36,21 @@ object XrayConfigGenerator {
         settings: AppSettings,
         hasGeoIp: Boolean = true,
         hasGeoSite: Boolean = true,
-        chainProfile: ServerProfile? = null
+        chainProfile: ServerProfile? = null,
+        failoverProfiles: List<ServerProfile> = emptyList()
     ): String {
         if (profile.protocol == ProxyProtocol.RAW_JSON && profile.rawJson.isNotBlank()) {
             return profile.rawJson
         }
+
+        val activeFailovers = if (settings.enableAutoFailover) {
+            failoverProfiles.filter {
+                it.id != profile.id &&
+                    it.protocol != ProxyProtocol.RAW_JSON &&
+                    it.protocol != ProxyProtocol.HYSTERIA2 &&
+                    it.protocol != ProxyProtocol.TUIC
+            }.take(4)
+        } else emptyList()
 
         val root = buildJsonObject {
             putJsonObject("log") {
@@ -65,7 +75,19 @@ object XrayConfigGenerator {
                 }
             }
 
-            // Proper root FakeDNS pool when enabled (fixes Xray startup crash)
+            // Xray Observatory Auto-Failover when multiple failover nodes are configured
+            if (activeFailovers.isNotEmpty()) {
+                putJsonObject("observatory") {
+                    putJsonArray("subjectSelector") {
+                        add("proxy")
+                    }
+                    put("probeUrl", settings.speedTest.pingUrl.ifBlank { "https://www.gstatic.com/generate_204" })
+                    put("probeInterval", "30s")
+                    put("enableConcurrency", true)
+                }
+            }
+
+            // Proper root FakeDNS pool when enabled
             if (settings.dns.enableFakeDns) {
                 putJsonArray("fakedns") {
                     add(buildJsonObject {
@@ -81,11 +103,11 @@ object XrayConfigGenerator {
             // Inbounds: Local SOCKS5 + HTTP + API
             put("inbounds", buildInbounds(settings))
 
-            // Outbounds: Primary Proxy + optional Chain Hop + optional Fragment + Direct + Block
-            put("outbounds", buildOutbounds(profile, settings, chainProfile))
+            // Outbounds: Primary Proxy + Failover nodes + optional Chain Hop + Fragment + Direct + Block
+            put("outbounds", buildOutbounds(profile, settings, chainProfile, activeFailovers))
 
-            // Routing Engine (with safe GeoData fallbacks)
-            put("routing", buildRouting(settings, hasGeoIp, hasGeoSite))
+            // Routing Engine (with optional leastPing balancer + safe GeoData fallbacks)
+            put("routing", buildRouting(settings, hasGeoIp, hasGeoSite, activeFailovers.isNotEmpty()))
         }
 
         return prettyJson.encodeToString(JsonObject.serializer(), root)
@@ -167,7 +189,8 @@ object XrayConfigGenerator {
     private fun buildOutbounds(
         profile: ServerProfile,
         settings: AppSettings,
-        chainProfile: ServerProfile?
+        chainProfile: ServerProfile?,
+        failoverProfiles: List<ServerProfile>
     ): JsonArray = buildJsonArray {
         val useFragment = settings.fragment.enabled &&
             profile.protocol != ProxyProtocol.WIREGUARD &&
@@ -177,7 +200,7 @@ object XrayConfigGenerator {
             chainProfile.id != profile.id &&
             chainProfile.protocol != ProxyProtocol.RAW_JSON
 
-        // Primary proxy outbound (if chained, dials through "proxy-hop")
+        // Primary proxy outbound
         add(
             buildOutbound(
                 tag = "proxy",
@@ -190,6 +213,18 @@ object XrayConfigGenerator {
                 }
             )
         )
+
+        // Observatory failover backup outbounds (proxy-1, proxy-2, ...)
+        failoverProfiles.forEachIndexed { idx, backup ->
+            add(
+                buildOutbound(
+                    tag = "proxy-${idx + 1}",
+                    profile = backup,
+                    settings = settings,
+                    dialerProxyTag = if (useFragment) "fragment" else null
+                )
+            )
+        }
 
         // Optional Multi-Hop Chain outbound
         if (useChain && chainProfile != null) {
@@ -387,7 +422,7 @@ object XrayConfigGenerator {
                 }
             }
 
-            ProxyProtocol.RAW_JSON -> {
+            ProxyProtocol.HYSTERIA2, ProxyProtocol.TUIC, ProxyProtocol.RAW_JSON -> {
                 put("protocol", "freedom")
             }
         }
@@ -505,8 +540,24 @@ object XrayConfigGenerator {
         }
     }
 
-    private fun buildRouting(settings: AppSettings, hasGeoIp: Boolean, hasGeoSite: Boolean): JsonObject = buildJsonObject {
+    private fun buildRouting(
+        settings: AppSettings,
+        hasGeoIp: Boolean,
+        hasGeoSite: Boolean,
+        enableBalancer: Boolean = false
+    ): JsonObject = buildJsonObject {
         put("domainStrategy", settings.domainStrategy)
+        if (enableBalancer) {
+            putJsonArray("balancers") {
+                add(buildJsonObject {
+                    put("tag", "auto-failover")
+                    putJsonArray("selector") { add("proxy") }
+                    putJsonObject("strategy") {
+                        put("type", "leastPing")
+                    }
+                })
+            }
+        }
         putJsonArray("rules") {
             add(buildJsonObject {
                 put("type", "field")
@@ -531,7 +582,11 @@ object XrayConfigGenerator {
                             RuleMatchType.PORT -> put("port", items.joinToString(","))
                             RuleMatchType.PROTOCOL -> putJsonArray("protocol") { items.forEach { add(it) } }
                         }
-                        put("outboundTag", rule.target.outboundTag)
+                        if (enableBalancer && rule.target.outboundTag == "proxy") {
+                            put("balancerTag", "auto-failover")
+                        } else {
+                            put("outboundTag", rule.target.outboundTag)
+                        }
                     })
                 }
             }
@@ -567,6 +622,14 @@ object XrayConfigGenerator {
                     })
                 }
                 RoutingPreset.CUSTOM -> Unit
+            }
+
+            if (enableBalancer) {
+                add(buildJsonObject {
+                    put("type", "field")
+                    put("network", "tcp,udp")
+                    put("balancerTag", "auto-failover")
+                })
             }
         }
     }

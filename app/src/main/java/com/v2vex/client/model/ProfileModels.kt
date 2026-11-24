@@ -9,10 +9,12 @@ enum class ProxyProtocol(val label: String) {
     VMESS("VMess"),
     TROJAN("Trojan"),
     SHADOWSOCKS("SS"),
+    HYSTERIA2("Hysteria2"),
+    TUIC("TUIC"),
     SOCKS("SOCKS5"),
     HTTP("HTTP"),
     WIREGUARD("WireGuard"),
-    RAW_JSON("Xray JSON")
+    RAW_JSON("Raw JSON")
 }
 
 @Serializable
@@ -46,7 +48,7 @@ data class ServerProfile(
     val encryption: String = "none",         // VLESS: none | VMess: auto/aes-128-gcm/chacha20-poly1305 | SS: cipher
     val flow: String = "",                   // e.g. xtls-rprx-vision
     val alterId: Int = 0,                    // VMess legacy
-    val username: String = "",               // SOCKS/HTTP
+    val username: String = "",               // SOCKS/HTTP or TUIC uuid
 
     // Transport
     val transport: TransportType = TransportType.TCP,
@@ -54,38 +56,47 @@ data class ServerProfile(
     val path: String = "/",                  // WS/HTTPUpgrade/XHTTP/H2 path or gRPC serviceName
     val grpcMode: String = "gun",            // gun / multi
     val xhttpMode: String = "auto",          // auto / packet-up / stream-up / stream-one
-    val headerType: String = "none",         // TCP/KCP header type (none/http/srtp/utp/wechat-video/dtls/wireguard)
+    val headerType: String = "none",         // TCP/KCP header type
 
     // Security (TLS / REALITY)
     val security: SecurityType = SecurityType.TLS,
     val sni: String = "",
-    val fingerprint: String = "chrome",      // uTLS: chrome, firefox, safari, ios, android, edge, randomized
-    val alpn: String = "",                   // e.g. h2,http/1.1
+    val fingerprint: String = "chrome",
+    val alpn: String = "",
     val allowInsecure: Boolean = false,
-    val realityPublicKey: String = "",       // pbk
-    val realityShortId: String = "",         // sid
-    val realitySpiderX: String = "",         // spx
+    val realityPublicKey: String = "",
+    val realityShortId: String = "",
+    val realitySpiderX: String = "",
+
+    // Hysteria2 / TUIC (Sing-box Dual-Core)
+    val obfsType: String = "",               // salamander
+    val obfsPassword: String = "",
+    val upMbps: Int = 50,
+    val downMbps: Int = 200,
+    val congestionControl: String = "bbr",   // TUIC: bbr / cubic / new_reno
 
     // WireGuard specifics
     val wgLocalAddress: String = "10.0.0.2/32",
     val wgPeerPublicKey: String = "",
     val wgPreSharedKey: String = "",
-    val wgReserved: String = "",             // comma-separated 3 bytes e.g. "12,34,56"
+    val wgReserved: String = "",
     val wgMtu: Int = 1420,
 
-    // Raw custom full Xray JSON override
+    // Raw custom full Xray/Sing-box JSON override
     val rawJson: String = "",
 
     // Metadata & Telemetry
     val subscriptionId: String? = null,
-    val latencyMs: Int? = null,              // null = untested, -1 = timeout/error
+    val latencyMs: Int? = null,
     val lastDownloadMbps: Double? = null,
     val lastUploadMbps: Double? = null,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     fun shortBadge(): String = buildString {
         append(protocol.label)
-        if (protocol != ProxyProtocol.RAW_JSON && protocol != ProxyProtocol.WIREGUARD) {
+        if (protocol == ProxyProtocol.HYSTERIA2 || protocol == ProxyProtocol.TUIC) {
+            append(" · QUIC · Sing-box")
+        } else if (protocol != ProxyProtocol.RAW_JSON && protocol != ProxyProtocol.WIREGUARD) {
             if (security != SecurityType.NONE) append(" · ").append(security.label)
             append(" · ").append(transport.label)
         }

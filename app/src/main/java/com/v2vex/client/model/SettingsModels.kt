@@ -103,7 +103,17 @@ data class SpeedTestSettings(
 )
 
 @Serializable
+enum class CoreEnginePreference(val label: String) {
+    AUTO("Auto (Smart Dual-Core)"),
+    XRAY("Xray-core"),
+    SING_BOX("Sing-box")
+}
+
+@Serializable
 data class AppSettings(
+    // Dual-Core Engine
+    val coreEngine: CoreEnginePreference = CoreEnginePreference.AUTO,
+
     // VPN & Local Ports
     val socksPort: Int = 10808,
     val httpPort: Int = 10809,
@@ -114,6 +124,10 @@ data class AppSettings(
 
     // Multi-Hop Proxy Chain (optional secondary node ID)
     val chainProfileId: String? = null,
+
+    // Xray Observatory Auto-Failover & Least-Ping Load Balancer
+    val enableAutoFailover: Boolean = false,
+    val failoverNodeIds: List<String> = emptyList(),
 
     // Routing
     val routingPreset: RoutingPreset = RoutingPreset.BYPASS_LAN,

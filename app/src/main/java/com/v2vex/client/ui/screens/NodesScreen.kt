@@ -87,6 +87,7 @@ fun NodesScreen(
     var searchQuery by remember { mutableStateOf("") }
     var filterProtocol by remember { mutableStateOf<ProxyProtocol?>(null) }
     var editingProfile by remember { mutableStateOf<ServerProfile?>(null) }
+    var qrProfile by remember { mutableStateOf<ServerProfile?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showSubDialog by remember { mutableStateOf(false) }
 
@@ -98,6 +99,20 @@ fun NodesScreen(
                 p.address.contains(searchQuery, ignoreCase = true)
             matchProto && matchQuery
         }
+    }
+
+    qrProfile?.let { prof ->
+        val uri = remember(prof) { UriParser.exportUri(prof) }
+        com.v2vex.client.ui.components.QrCodeDialog(
+            title = prof.name,
+            payload = uri,
+            onCopyUri = {
+                clipboard.setText(AnnotatedString(uri))
+                qrProfile = null
+                onShowMessage("Copied ${prof.protocol.label} URI to clipboard")
+            },
+            onDismiss = { qrProfile = null }
+        )
     }
 
     editingProfile?.let { prof ->
@@ -308,11 +323,7 @@ fun NodesScreen(
                     selected = isSelected,
                     onSelect = { onSelectProfile(profile.id) },
                     onEdit = { editingProfile = profile },
-                    onShare = {
-                        val uri = UriParser.exportUri(profile)
-                        clipboard.setText(AnnotatedString(uri))
-                        onShowMessage("Copied ${profile.protocol.label} URI to clipboard")
-                    },
+                    onShare = { qrProfile = profile },
                     onDuplicate = {
                         onUpsertProfile(
                             profile.copy(

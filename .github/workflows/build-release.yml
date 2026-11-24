@@ -99,16 +99,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" "${APK_NAME}" \
-            --title "V2Vex ${GITHUB_REF_NAME} — Full L3 TUN & Precision Engine" \
-            --notes "## ⚡ V2Vex ${GITHUB_REF_NAME} — Full L3 TUN & Precision Engine
+            --title "V2Vex ${GITHUB_REF_NAME} — Modular Dual-Core · Real-Time Full Log · Precision Speed Meter" \
+            --notes "## ⚡ V2Vex ${GITHUB_REF_NAME} — Phase 1–4 Complete
 
           ### 🔥 What's New in ${GITHUB_REF_NAME}
-          - 🛡️ **Full L3 TUN Engine (\`hev-socks5-tunnel\`)**: Complete TCP + UDP + DNS routing on Android 7.0–15+ with zero blackhole packets!
-          - 📊 **Zero Double-Count Live Telemetry**: Exact RX/TX bytes read directly from native \`TProxyGetStats()\`.
-          - 🎯 **SpeedLab v2**: Warm Keep-Alive True RTT & Jitter (no TLS handshake skew) + Server-ACK Upload (no local socket buffer bias).
-          - 🔄 **Seamless Hot-Reload & Crash Watchdog**: Toggling DPI Fragment, Mux, Routing, or switching nodes hot-reloads Xray-core without dropping TUN; real exit watchdog + zombie-proof \`SIGKILL\` cleanup.
-          - 🔗 **Multi-Hop Proxy Chaining**: Route Node A → Node B (\`dialerProxy\`) directly from Settings.
-          - ⚡ **True 99% Fast & Light**: Removed \`material-icons-extended\` bloat, eliminated all main-thread disk I/O, added rotation-safe \`ViewModel\`, batched \`LogBuffer\`, fixed \`FakeDNS\` root pool + missing-GeoIP CIDR fallback, SHA-256 verification, and hardened cloud backup rules.
+          - 📊 **Fixed Live & Notification Speed Meter**: Removed \`setHttpProxy\` TUN bypass so 100% of HTTP/HTTPS/UDP/DNS traffic flows through L3 TUN; hybrid \`TProxyGetStats()\` + UID socket stats with EMA smoothing; **1-second live speed right in the notification title** + session totals!
+          - 🪵 **Real-Time Full Log Console**: 1-tap \`LIVE LOG\` button on Dashboard, 3000-line 100ms live stream, persistent rolling log file, global crash stacktrace recorder, 1-tap Xray \`debug/info/warning\` hot-reload switch, source/level/search filters, and 1-tap **Copy/Share Full Sanitized Bug Report**.
+          - 🧬 **Modular Dual-Core Engine (Phase 4)**: Smart Dual-Core (**Xray-core** + **Sing-box**), **Hysteria2** & **TUIC v5** protocol support, and external Android 10–15 W^X-compliant Core Plugin APK discovery (\`com.v2vex.core.xray\` / \`com.v2vex.core.singbox\`).
+          - 🛡️ **Observatory Auto-Failover & Multi-Hop Proxy Chain**: Xray \`observatory\` + \`leastPing\` load balancer across backup nodes + Multi-Hop \`dialerProxy\` chaining.
+          - 📱 **QR Code Sharing + Universal Subscription Parser**: ISO-18004 QR Code Generator on every node + import **Clash / Mihomo YAML** & **Sing-box JSON** subscriptions.
+          - 🎯 **SpeedLab v2 + Node vs Node Ranking**: Keep-Alive True RTT, Server-ACK Upload, and live Top-3 Node Speed Ranking.
 
           ### 📦 Included in this APK
-          - Official **XTLS/Xray-core \`${CORE_VER}\`** (\`arm64-v8a\`) + **\`hev-socks5-tunnel\`** + \`geoip.dat\` & \`geosite.dat\`"
+          - Official **XTLS/Xray-core \`${CORE_VER}\`** (\`arm64-v8a\`) + native C **\`hev-socks5-tunnel\`** L3 TUN + \`geoip.dat\` & \`geosite.dat\`"

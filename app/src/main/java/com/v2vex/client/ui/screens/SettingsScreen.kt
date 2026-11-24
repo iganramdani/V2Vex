@@ -221,6 +221,27 @@ fun SettingsScreen(
             }
 
             Spacer(modifier = Modifier.height(6.dp))
+            Text("Dual-Core Engine Mode", style = MaterialTheme.typography.labelMedium)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                com.v2vex.client.model.CoreEnginePreference.entries.forEach { engine ->
+                    FilterChip(
+                        selected = settings.coreEngine == engine,
+                        onClick = { onUpdateSettings { it.copy(coreEngine = engine) } },
+                        label = { Text(engine.label) }
+                    )
+                }
+            }
+            SettingToggleRow(
+                title = "Observatory Auto-Failover (Least-Ping)",
+                subtitle = "Automatically switch to fastest healthy node without dropping tunnel",
+                checked = settings.enableAutoFailover,
+                onCheckedChange = { on -> onUpdateSettings { it.copy(enableAutoFailover = on) } }
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)

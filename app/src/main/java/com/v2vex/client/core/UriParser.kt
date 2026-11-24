@@ -22,14 +22,21 @@ object UriParser {
     private val lenientJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /**
-     * Parses a single URI, raw Xray JSON, or multi-line / Base64-encoded subscription payload.
+     * Universal parser supporting:
+     * - Single or multi-line URIs (vless, vmess, trojan, ss, hysteria2/hy2, tuic, socks, wireguard)
+     * - Base64-encoded subscription lists
+     * - Clash / Mihomo YAML (`proxies:` section)
+     * - Sing-box JSON (`outbounds` array)
+     * - Raw Xray JSON
      */
     fun parseBatch(rawInput: String, subscriptionId: String? = null): List<ServerProfile> {
         val trimmed = rawInput.trim()
         if (trimmed.isEmpty()) return emptyList()
 
-        // If input looks like a full Xray JSON object
+        // 1. JSON payload: Sing-box outbounds array OR Raw Xray JSON
         if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            val singBoxParsed = parseSingBoxOutbounds(trimmed, subscriptionId)
+            if (singBoxParsed.isNotEmpty()) return singBoxParsed
             return listOf(
                 ServerProfile(
                     name = "Custom Xray JSON",
@@ -40,7 +47,13 @@ object UriParser {
             )
         }
 
-        // Check if entire payload is Base64-encoded URI list (standard subscription format)
+        // 2. Clash / Mihomo YAML subscription (`proxies:`)
+        if (trimmed.contains("\nproxies:") || trimmed.startsWith("proxies:")) {
+            val clashParsed = parseClashYaml(trimmed, subscriptionId)
+            if (clashParsed.isNotEmpty()) return clashParsed
+        }
+
+        // 3. Base64-encoded URI list or plain multi-line URIs
         val decodedPayload = if (!trimmed.contains("://")) {
             decodeBase64Safe(trimmed) ?: trimmed
         } else {
@@ -62,6 +75,9 @@ object UriParser {
                 clean.startsWith("vmess://", ignoreCase = true) -> parseVmess(clean)
                 clean.startsWith("trojan://", ignoreCase = true) -> parseTrojan(clean)
                 clean.startsWith("ss://", ignoreCase = true) -> parseShadowsocks(clean)
+                clean.startsWith("hysteria2://", ignoreCase = true) ||
+                    clean.startsWith("hy2://", ignoreCase = true) -> parseHysteria2(clean)
+                clean.startsWith("tuic://", ignoreCase = true) -> parseTuic(clean)
                 clean.startsWith("socks://", ignoreCase = true) ||
                     clean.startsWith("socks5://", ignoreCase = true) -> parseSocks(clean)
                 clean.startsWith("wireguard://", ignoreCase = true) ||
@@ -365,8 +381,205 @@ object UriParser {
                 "wireguard://${encodeUrl(profile.uuidOrPassword)}@${formatHost(profile.address)}:${profile.port}?$qs#${encodeUrl(profile.name)}"
             }
 
+            ProxyProtocol.HYSTERIA2 -> {
+                val params = linkedMapOf<String, String>()
+                if (profile.sni.isNotBlank()) params["sni"] = profile.sni
+                if (profile.allowInsecure) params["insecure"] = "1"
+                if (profile.obfsType.isNotBlank()) params["obfs"] = profile.obfsType
+                if (profile.obfsPassword.isNotBlank()) params["obfs-password"] = profile.obfsPassword
+                val qs = params.entries.joinToString("&") { (k, v) -> "$k=${encodeUrl(v)}" }
+                "hysteria2://${encodeUrl(profile.uuidOrPassword)}@${formatHost(profile.address)}:${profile.port}?$qs#${encodeUrl(profile.name)}"
+            }
+
+            ProxyProtocol.TUIC -> {
+                val params = linkedMapOf<String, String>()
+                if (profile.sni.isNotBlank()) params["sni"] = profile.sni
+                if (profile.congestionControl.isNotBlank()) params["congestion_control"] = profile.congestionControl
+                if (profile.alpn.isNotBlank()) params["alpn"] = profile.alpn
+                if (profile.allowInsecure) params["allow_insecure"] = "1"
+                val qs = params.entries.joinToString("&") { (k, v) -> "$k=${encodeUrl(v)}" }
+                val uuid = profile.username.ifBlank { profile.uuidOrPassword }
+                "tuic://${encodeUrl(uuid)}:${encodeUrl(profile.uuidOrPassword)}@${formatHost(profile.address)}:${profile.port}?$qs#${encodeUrl(profile.name)}"
+            }
+
             ProxyProtocol.RAW_JSON -> profile.rawJson
         }
+    }
+
+    private fun parseHysteria2(raw: String): ServerProfile {
+        val normalized = raw.replaceFirst("hy2://", "hysteria2://", ignoreCase = true)
+        val uri = URI(normalized)
+        val query = parseQuery(uri.rawQuery)
+        val remark = decodeUrl(uri.rawFragment).ifBlank { "Hy2 ${uri.host}:${uri.port}" }
+        return ServerProfile(
+            name = remark,
+            protocol = ProxyProtocol.HYSTERIA2,
+            address = uri.host ?: "",
+            port = if (uri.port > 0) uri.port else 443,
+            uuidOrPassword = decodeUrl(uri.rawUserInfo),
+            security = SecurityType.TLS,
+            sni = query["sni"].orEmpty().ifBlank { uri.host ?: "" },
+            allowInsecure = query["insecure"] == "1" || query["allowInsecure"] == "1",
+            obfsType = query["obfs"].orEmpty(),
+            obfsPassword = query["obfs-password"].orEmpty()
+        )
+    }
+
+    private fun parseTuic(raw: String): ServerProfile {
+        val uri = URI(raw)
+        val query = parseQuery(uri.rawQuery)
+        val remark = decodeUrl(uri.rawFragment).ifBlank { "TUIC ${uri.host}:${uri.port}" }
+        val userInfo = decodeUrl(uri.rawUserInfo)
+        val uuid = userInfo.substringBefore(":")
+        val pass = userInfo.substringAfter(":", "")
+        return ServerProfile(
+            name = remark,
+            protocol = ProxyProtocol.TUIC,
+            address = uri.host ?: "",
+            port = if (uri.port > 0) uri.port else 443,
+            username = uuid,
+            uuidOrPassword = pass,
+            security = SecurityType.TLS,
+            sni = query["sni"].orEmpty().ifBlank { uri.host ?: "" },
+            alpn = query["alpn"].orEmpty().ifBlank { "h3" },
+            congestionControl = query["congestion_control"].orEmpty().ifBlank { "bbr" },
+            allowInsecure = query["allow_insecure"] == "1" || query["insecure"] == "1"
+        )
+    }
+
+    /**
+     * Lightweight Clash / Mihomo YAML `proxies:` parser (zero SnakeYAML bloat!).
+     * Handles both inline flow maps (`- { name: ..., type: vless, ... }`) and multi-line block maps.
+     */
+    private fun parseClashYaml(yaml: String, subscriptionId: String?): List<ServerProfile> {
+        val out = mutableListOf<ServerProfile>()
+        val lines = yaml.lines()
+        var inProxies = false
+        var currentMap = linkedMapOf<String, String>()
+
+        fun flushCurrent() {
+            if (currentMap.isEmpty()) return
+            val type = currentMap["type"]?.lowercase() ?: return
+            val server = currentMap["server"].orEmpty()
+            val port = currentMap["port"]?.toIntOrNull() ?: 443
+            val name = currentMap["name"].orEmpty().ifBlank { "$server:$port" }
+            val proto = when (type) {
+                "vless" -> ProxyProtocol.VLESS
+                "vmess" -> ProxyProtocol.VMESS
+                "trojan" -> ProxyProtocol.TROJAN
+                "ss" -> ProxyProtocol.SHADOWSOCKS
+                "hysteria2" -> ProxyProtocol.HYSTERIA2
+                "tuic" -> ProxyProtocol.TUIC
+                else -> null
+            }
+            if (proto != null && server.isNotBlank()) {
+                out.add(
+                    ServerProfile(
+                        name = name,
+                        protocol = proto,
+                        address = server,
+                        port = port,
+                        uuidOrPassword = currentMap["uuid"] ?: currentMap["password"] ?: "",
+                        encryption = currentMap["cipher"] ?: "none",
+                        flow = currentMap["flow"].orEmpty(),
+                        transport = mapTransport(currentMap["network"]),
+                        security = if (currentMap["tls"] == "true" || proto == ProxyProtocol.TROJAN || proto == ProxyProtocol.HYSTERIA2 || proto == ProxyProtocol.TUIC) {
+                            SecurityType.TLS
+                        } else SecurityType.NONE,
+                        sni = currentMap["servername"] ?: currentMap["sni"] ?: "",
+                        allowInsecure = currentMap["skip-cert-verify"] == "true",
+                        subscriptionId = subscriptionId
+                    )
+                )
+            }
+            currentMap = linkedMapOf()
+        }
+
+        for (rawLine in lines) {
+            val trimmed = rawLine.trim()
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
+            if (!rawLine.startsWith(" ") && !rawLine.startsWith("\t") && !rawLine.startsWith("-")) {
+                if (trimmed.startsWith("proxies:")) {
+                    inProxies = true
+                    continue
+                } else if (inProxies) {
+                    flushCurrent()
+                    inProxies = false
+                }
+            }
+            if (!inProxies) continue
+
+            if (trimmed.startsWith("- {") && trimmed.endsWith("}")) {
+                flushCurrent()
+                val inner = trimmed.removePrefix("- {").removeSuffix("}")
+                inner.split(",").forEach { pair ->
+                    val idx = pair.indexOf(':')
+                    if (idx > 0) {
+                        val k = pair.substring(0, idx).trim().trim('"', '\'')
+                        val v = pair.substring(idx + 1).trim().trim('"', '\'')
+                        currentMap[k] = v
+                    }
+                }
+                flushCurrent()
+            } else if (trimmed.startsWith("- ")) {
+                flushCurrent()
+                val kv = trimmed.removePrefix("- ")
+                val idx = kv.indexOf(':')
+                if (idx > 0) {
+                    currentMap[kv.substring(0, idx).trim()] = kv.substring(idx + 1).trim().trim('"', '\'')
+                }
+            } else {
+                val idx = trimmed.indexOf(':')
+                if (idx > 0) {
+                    currentMap[trimmed.substring(0, idx).trim()] = trimmed.substring(idx + 1).trim().trim('"', '\'')
+                }
+            }
+        }
+        flushCurrent()
+        return out
+    }
+
+    /**
+     * Parses Sing-box JSON `outbounds` array into V2Vex ServerProfiles.
+     */
+    private fun parseSingBoxOutbounds(rawJson: String, subscriptionId: String?): List<ServerProfile> {
+        return runCatching {
+            val root = lenientJson.parseToJsonElement(rawJson).jsonObject
+            val outbounds = root["outbounds"] as? kotlinx.serialization.json.JsonArray ?: return emptyList()
+            val list = mutableListOf<ServerProfile>()
+            for (el in outbounds) {
+                val obj = el.jsonObject
+                val type = obj["type"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: continue
+                val proto = when (type) {
+                    "vless" -> ProxyProtocol.VLESS
+                    "vmess" -> ProxyProtocol.VMESS
+                    "trojan" -> ProxyProtocol.TROJAN
+                    "shadowsocks" -> ProxyProtocol.SHADOWSOCKS
+                    "hysteria2" -> ProxyProtocol.HYSTERIA2
+                    "tuic" -> ProxyProtocol.TUIC
+                    else -> continue
+                }
+                val server = obj["server"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val port = obj["server_port"]?.jsonPrimitive?.intOrNull ?: 443
+                val tag = obj["tag"]?.jsonPrimitive?.contentOrNull.orEmpty().ifBlank { "$server:$port" }
+                if (server.isBlank()) continue
+                list.add(
+                    ServerProfile(
+                        name = tag,
+                        protocol = proto,
+                        address = server,
+                        port = port,
+                        uuidOrPassword = obj["uuid"]?.jsonPrimitive?.contentOrNull
+                            ?: obj["password"]?.jsonPrimitive?.contentOrNull
+                            ?: "",
+                        encryption = obj["method"]?.jsonPrimitive?.contentOrNull ?: "none",
+                        flow = obj["flow"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        subscriptionId = subscriptionId
+                    )
+                )
+            }
+            list
+        }.getOrDefault(emptyList())
     }
 
     private fun mapTransport(raw: String?): TransportType = when (raw?.lowercase()) {

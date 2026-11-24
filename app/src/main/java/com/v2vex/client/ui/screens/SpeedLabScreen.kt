@@ -252,7 +252,53 @@ fun SpeedLabScreen(
             LabStatCard("Stability", String.format("%.0f%%", progress.stabilityPercent), XrayEmerald, Modifier.weight(1f))
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Node vs Node Benchmark Ranking (Top 3 fastest nodes)
+        val topRanking = remember(history) {
+            history.groupBy { it.profileName }
+                .mapValues { (_, recs) -> recs.maxBy { it.downloadMbps } }
+                .values
+                .sortedByDescending { it.downloadMbps }
+                .take(3)
+        }
+        if (topRanking.size >= 2) {
+            Text(
+                text = "Node vs Node Speed Ranking",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, XrayEmerald.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    topRanking.forEachIndexed { idx, rec ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "#${idx + 1} ${rec.profileName}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (idx == 0) FontWeight.Bold else FontWeight.Normal,
+                                color = if (idx == 0) XrayEmerald else MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "↓ ${String.format("%.1f", rec.downloadMbps)} · ↑ ${String.format("%.1f", rec.uploadMbps)} Mbps · ${String.format("%.0f", rec.pingMs)}ms",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = XrayCyan
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+        }
 
         // Benchmark History
         Row(

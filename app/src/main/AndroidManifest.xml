@@ -41,6 +41,9 @@
                 <data android:scheme="vmess" />
                 <data android:scheme="trojan" />
                 <data android:scheme="ss" />
+                <data android:scheme="hysteria2" />
+                <data android:scheme="hy2" />
+                <data android:scheme="tuic" />
                 <data android:scheme="v2vex" />
             </intent-filter>
         </activity>

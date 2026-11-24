@@ -67,12 +67,30 @@ class CoreManager(private val context: Context) {
         }
     }
 
+    val runtimeSingBoxBinary: File get() = File(coreDir, "sing-box")
+    val bundledSingBoxBinary: File get() = File(context.applicationInfo.nativeLibraryDir, "libsingbox.so")
+
+    /**
+     * Resolves an external Core Plugin APK's nativeLibraryDir binary (Android 10-15 W^X compliant!).
+     * Plugin package IDs:
+     * - com.v2vex.core.xray    -> libxray.so
+     * - com.v2vex.core.singbox -> libsingbox.so
+     */
+    private fun resolvePluginBinary(pluginPackage: String, libName: String): File? = runCatching {
+        val appInfo = context.packageManager.getApplicationInfo(pluginPackage, 0)
+        val file = File(appInfo.nativeLibraryDir, libName)
+        if (file.exists() && file.length() > 0L) file else null
+    }.getOrNull()
+
     fun resolveExecutableBinary(): Pair<File?, String> {
         if (runtimeXrayBinary.exists() && runtimeXrayBinary.length() > 0L) {
             runtimeXrayBinary.setExecutable(true, false)
             if (canExecute(runtimeXrayBinary)) {
                 return runtimeXrayBinary to "Hot-Swapped (filesDir)"
             }
+        }
+        resolvePluginBinary("com.v2vex.core.xray", "libxray.so")?.let { pluginBin ->
+            if (canExecute(pluginBin)) return pluginBin to "Plugin APK (Xray)"
         }
         if (bundledXrayBinary.exists() && bundledXrayBinary.length() > 0L) {
             if (canExecute(bundledXrayBinary)) {
@@ -83,6 +101,24 @@ class CoreManager(private val context: Context) {
             return runtimeXrayBinary to "Blocked by Android W^X"
         }
         return null to "Not Installed"
+    }
+
+    fun resolveSingBoxBinary(): Pair<File?, String> {
+        if (runtimeSingBoxBinary.exists() && runtimeSingBoxBinary.length() > 0L) {
+            runtimeSingBoxBinary.setExecutable(true, false)
+            if (canExecute(runtimeSingBoxBinary)) {
+                return runtimeSingBoxBinary to "Hot-Swapped (Sing-box)"
+            }
+        }
+        resolvePluginBinary("com.v2vex.core.singbox", "libsingbox.so")?.let { pluginBin ->
+            if (canExecute(pluginBin)) return pluginBin to "Plugin APK (Sing-box)"
+        }
+        if (bundledSingBoxBinary.exists() && bundledSingBoxBinary.length() > 0L) {
+            if (canExecute(bundledSingBoxBinary)) {
+                return bundledSingBoxBinary to "Bundled (Sing-box)"
+            }
+        }
+        return null to "Sing-box Plugin Not Installed"
     }
 
     suspend fun inspectInstalledCore(): CoreInfo = withContext(Dispatchers.IO) {

@@ -30,20 +30,26 @@ class XrayProcessManager(
     suspend fun start(
         configJson: String,
         scope: CoroutineScope,
+        useSingBox: Boolean = false,
         onUnexpectedExit: (Int) -> Unit = {}
     ): Pair<Boolean, String> {
         stop()
 
-        val configFile = File(context.filesDir, "config.json")
+        val configFile = File(context.filesDir, if (useSingBox) "singbox.json" else "config.json")
         configFile.writeText(configJson)
 
-        val (binary, source) = coreManager.resolveExecutableBinary()
+        val (binary, source) = if (useSingBox) {
+            coreManager.resolveSingBoxBinary()
+        } else {
+            coreManager.resolveExecutableBinary()
+        }
+        val engineName = if (useSingBox) "Sing-box" else "Xray-core"
         if (binary == null || !binary.canExecute()) {
             LogBuffer.e(
                 "Core",
-                "No executable Xray binary found ($source). Cannot start tunnel."
+                "No executable $engineName binary found ($source). Cannot start tunnel."
             )
-            return false to "No executable Xray-core ($source)"
+            return false to "No executable $engineName ($source)"
         }
 
         return try {
@@ -54,47 +60,49 @@ class XrayProcessManager(
 
             val proc = pb.start()
             process = proc
-            LogBuffer.i("Xray", "Launching Xray-core from $source (${binary.name})")
+            LogBuffer.i(engineName, "Launching $engineName from $source (${binary.name})")
 
             logJob = scope.launch(Dispatchers.IO) {
                 runCatching {
                     proc.inputStream.bufferedReader().forEachLine { line ->
                         val lvl = when {
                             line.contains("[Error]", ignoreCase = true) ||
+                                line.contains("FATAL", ignoreCase = true) ||
                                 line.contains("failed", ignoreCase = true) -> LogLevel.ERROR
-                            line.contains("[Warning]", ignoreCase = true) -> LogLevel.WARN
+                            line.contains("[Warning]", ignoreCase = true) ||
+                                line.contains("WARN", ignoreCase = true) -> LogLevel.WARN
                             line.contains("[Debug]", ignoreCase = true) -> LogLevel.DEBUG
                             else -> LogLevel.INFO
                         }
-                        LogBuffer.log(lvl, "Xray", line)
+                        LogBuffer.log(lvl, engineName, line)
                     }
                 }
             }
 
-            // Health probe: wait 350ms to ensure Xray didn't crash immediately on config/port error
+            // Health probe: wait 350ms to ensure core didn't crash immediately on config/port error
             delay(350)
             val exitedEarly = runCatching { proc.exitValue(); true }.getOrDefault(false)
             if (exitedEarly) {
                 val code = runCatching { proc.exitValue() }.getOrDefault(-1)
-                LogBuffer.e("Xray", "Xray-core exited immediately (code $code). Check Live Logs.")
+                LogBuffer.e(engineName, "$engineName exited immediately (code $code). Check Live Logs.")
                 stop()
-                return false to "Xray exited (code $code)"
+                return false to "$engineName exited (code $code)"
             }
 
-            // Watchdog: notify VPN service if Xray crashes later
+            // Watchdog: notify VPN service if core crashes later
             watchdogJob = scope.launch(Dispatchers.IO) {
                 val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
                 if (process === proc) {
-                    LogBuffer.e("Xray", "Xray-core terminated unexpectedly (exit code $exitCode)")
+                    LogBuffer.e(engineName, "$engineName terminated unexpectedly (exit code $exitCode)")
                     onUnexpectedExit(exitCode)
                 }
             }
 
-            true to "Xray-core ($source)"
+            true to "$engineName ($source)"
         } catch (t: Throwable) {
-            LogBuffer.e("Xray", "Failed to launch Xray-core: ${t.message}")
+            LogBuffer.e(engineName, "Failed to launch $engineName: ${t.message}")
             stop()
-            false to "Core launch error: ${t.message}"
+            false to "$engineName launch error: ${t.message}"
         }
     }
 
