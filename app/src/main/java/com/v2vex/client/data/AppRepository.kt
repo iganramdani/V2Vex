@@ -9,24 +9,36 @@ import com.v2vex.client.model.ServerProfile
 import com.v2vex.client.model.SpeedTestRecord
 import com.v2vex.client.model.Subscription
 import com.v2vex.client.model.TransportType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.UUID
 
 @Serializable
 data class FullBackupPayload(
-    val version: Int = 1,
+    val version: Int = 2,
     val profiles: List<ServerProfile> = emptyList(),
     val subscriptions: List<Subscription> = emptyList(),
     val settings: AppSettings = AppSettings(),
     val selectedProfileId: String? = null
 )
 
+/**
+ * Thread-safe, zero-main-thread-I/O JSON repository.
+ * All disk reads and atomic writes happen off the main thread under a single IO lock.
+ */
 class AppRepository(context: Context) {
+
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val fileLock = Any()
 
     private val json = Json {
         prettyPrint = true
@@ -34,7 +46,7 @@ class AppRepository(context: Context) {
         encodeDefaults = true
     }
 
-    private val storageDir = File(context.filesDir, "store").apply { mkdirs() }
+    private val storageDir = File(context.filesDir, "store")
     private val profilesFile = File(storageDir, "profiles.json")
     private val subsFile = File(storageDir, "subscriptions.json")
     private val settingsFile = File(storageDir, "settings.json")
@@ -56,82 +68,97 @@ class AppRepository(context: Context) {
     private val _speedHistory = MutableStateFlow<List<SpeedTestRecord>>(emptyList())
     val speedHistory: StateFlow<List<SpeedTestRecord>> = _speedHistory.asStateFlow()
 
-    init {
-        loadAll()
+    @Volatile
+    private var loaded = false
+
+    fun loadAsync() {
+        ioScope.launch { ensureLoaded() }
     }
 
-    private fun loadAll() {
-        _settings.value = readJson(settingsFile) ?: AppSettings()
-        _subscriptions.value = readJson(subsFile) ?: emptyList()
-        _speedHistory.value = readJson(historyFile) ?: emptyList()
+    fun ensureLoaded() {
+        if (loaded) return
+        synchronized(fileLock) {
+            if (loaded) return
+            storageDir.mkdirs()
+            _settings.value = readJson(settingsFile) ?: AppSettings()
+            _subscriptions.value = readJson(subsFile) ?: emptyList()
+            _speedHistory.value = readJson(historyFile) ?: emptyList()
 
-        val loadedProfiles: List<ServerProfile>? = readJson(profilesFile)
-        if (loadedProfiles == null) {
-            // Seed starter templates on first launch so user can immediately explore & edit
-            val starters = listOf(
-                ServerProfile(
-                    name = "SG-01 · VLESS REALITY Vision",
-                    protocol = ProxyProtocol.VLESS,
-                    address = "sg01.example.com",
-                    port = 443,
-                    uuidOrPassword = "00000000-0000-0000-0000-000000000001",
-                    flow = "xtls-rprx-vision",
-                    transport = TransportType.TCP,
-                    security = SecurityType.REALITY,
-                    sni = "www.cloudflare.com",
-                    fingerprint = "chrome",
-                    realityPublicKey = "REPLACE_WITH_REALITY_PUBLIC_KEY",
-                    realityShortId = "a1b2c3d4"
-                ),
-                ServerProfile(
-                    name = "JP-02 · VLESS XHTTP TLS",
-                    protocol = ProxyProtocol.VLESS,
-                    address = "jp02.example.com",
-                    port = 443,
-                    uuidOrPassword = "00000000-0000-0000-0000-000000000002",
-                    transport = TransportType.XHTTP,
-                    host = "jp02.example.com",
-                    path = "/xhttp",
-                    xhttpMode = "auto",
-                    security = SecurityType.TLS,
-                    sni = "jp02.example.com",
-                    fingerprint = "firefox",
-                    alpn = "h2,http/1.1"
-                ),
-                ServerProfile(
-                    name = "US-03 · Trojan gRPC TLS",
-                    protocol = ProxyProtocol.TROJAN,
-                    address = "us03.example.com",
-                    port = 443,
-                    uuidOrPassword = "replace-with-trojan-password",
-                    transport = TransportType.GRPC,
-                    path = "v2vex-grpc",
-                    grpcMode = "multi",
-                    security = SecurityType.TLS,
-                    sni = "us03.example.com",
-                    fingerprint = "safari"
+            val loadedProfiles: List<ServerProfile>? = readJson(profilesFile)
+            if (loadedProfiles == null) {
+                val starters = listOf(
+                    ServerProfile(
+                        name = "SG-01 · VLESS REALITY Vision",
+                        protocol = ProxyProtocol.VLESS,
+                        address = "sg01.example.com",
+                        port = 443,
+                        uuidOrPassword = "00000000-0000-0000-0000-000000000001",
+                        flow = "xtls-rprx-vision",
+                        transport = TransportType.TCP,
+                        security = SecurityType.REALITY,
+                        sni = "www.cloudflare.com",
+                        fingerprint = "chrome",
+                        realityPublicKey = "REPLACE_WITH_REALITY_PUBLIC_KEY",
+                        realityShortId = "a1b2c3d4"
+                    ),
+                    ServerProfile(
+                        name = "JP-02 · VLESS XHTTP TLS",
+                        protocol = ProxyProtocol.VLESS,
+                        address = "jp02.example.com",
+                        port = 443,
+                        uuidOrPassword = "00000000-0000-0000-0000-000000000002",
+                        transport = TransportType.XHTTP,
+                        host = "jp02.example.com",
+                        path = "/xhttp",
+                        xhttpMode = "auto",
+                        security = SecurityType.TLS,
+                        sni = "jp02.example.com",
+                        fingerprint = "firefox",
+                        alpn = "h2,http/1.1"
+                    ),
+                    ServerProfile(
+                        name = "US-03 · Trojan gRPC TLS",
+                        protocol = ProxyProtocol.TROJAN,
+                        address = "us03.example.com",
+                        port = 443,
+                        uuidOrPassword = "replace-with-trojan-password",
+                        transport = TransportType.GRPC,
+                        path = "v2vex-grpc",
+                        grpcMode = "multi",
+                        security = SecurityType.TLS,
+                        sni = "us03.example.com",
+                        fingerprint = "safari"
+                    )
                 )
-            )
-            _profiles.value = starters
-            _selectedProfileId.value = starters.first().id
-            saveProfiles()
-            saveSelectedId()
-        } else {
-            _profiles.value = loadedProfiles
-            val savedId = if (metaFile.exists()) metaFile.readText().trim().ifBlank { null } else null
-            _selectedProfileId.value = savedId?.takeIf { id -> loadedProfiles.any { it.id == id } }
-                ?: loadedProfiles.firstOrNull()?.id
+                _profiles.value = starters
+                _selectedProfileId.value = starters.first().id
+                writeJsonSync(profilesFile, starters)
+                writeTextSync(metaFile, starters.first().id)
+            } else {
+                _profiles.value = loadedProfiles
+                val savedId = if (metaFile.exists()) metaFile.readText().trim().ifBlank { null } else null
+                _selectedProfileId.value = savedId?.takeIf { id -> loadedProfiles.any { it.id == id } }
+                    ?: loadedProfiles.firstOrNull()?.id
+            }
+            loaded = true
         }
     }
 
     fun getSelectedProfile(): ServerProfile? {
+        ensureLoaded()
         val id = _selectedProfileId.value ?: return _profiles.value.firstOrNull()
         return _profiles.value.firstOrNull { it.id == id } ?: _profiles.value.firstOrNull()
     }
 
+    fun getProfileById(id: String?): ServerProfile? {
+        if (id.isNullOrBlank()) return null
+        ensureLoaded()
+        return _profiles.value.firstOrNull { it.id == id }
+    }
+
     fun selectProfile(id: String) {
         _selectedProfileId.value = id
-        saveSelectedId()
+        saveSelectedIdAsync()
     }
 
     fun upsertProfile(profile: ServerProfile) {
@@ -141,9 +168,9 @@ class AppRepository(context: Context) {
         _profiles.value = list
         if (_selectedProfileId.value == null) {
             _selectedProfileId.value = profile.id
-            saveSelectedId()
+            saveSelectedIdAsync()
         }
-        saveProfiles()
+        saveProfilesAsync()
     }
 
     fun addProfiles(newProfiles: List<ServerProfile>) {
@@ -153,9 +180,9 @@ class AppRepository(context: Context) {
         _profiles.value = list
         if (_selectedProfileId.value == null) {
             _selectedProfileId.value = newProfiles.first().id
-            saveSelectedId()
+            saveSelectedIdAsync()
         }
-        saveProfiles()
+        saveProfilesAsync()
     }
 
     fun replaceSubscriptionProfiles(subscriptionId: String, newProfiles: List<ServerProfile>) {
@@ -163,9 +190,9 @@ class AppRepository(context: Context) {
         _profiles.value = newProfiles + kept
         if (_selectedProfileId.value == null || _profiles.value.none { it.id == _selectedProfileId.value }) {
             _selectedProfileId.value = _profiles.value.firstOrNull()?.id
-            saveSelectedId()
+            saveSelectedIdAsync()
         }
-        saveProfiles()
+        saveProfilesAsync()
     }
 
     fun deleteProfile(id: String) {
@@ -173,17 +200,20 @@ class AppRepository(context: Context) {
         _profiles.value = updated
         if (_selectedProfileId.value == id) {
             _selectedProfileId.value = updated.firstOrNull()?.id
-            saveSelectedId()
+            saveSelectedIdAsync()
         }
-        saveProfiles()
+        saveProfilesAsync()
     }
 
-    fun updateLatencies(results: Map<String, Int>) {
+    /**
+     * Updates latencies in memory (optionally skipping disk write during intermediate batch ticks).
+     */
+    fun updateLatencies(results: Map<String, Int>, persist: Boolean = true) {
         _profiles.value = _profiles.value.map { p ->
             val ms = results[p.id]
             if (ms != null) p.copy(latencyMs = ms) else p
         }
-        saveProfiles()
+        if (persist) saveProfilesAsync()
     }
 
     fun updateProfileSpeed(profileId: String?, downloadMbps: Double, uploadMbps: Double) {
@@ -192,7 +222,7 @@ class AppRepository(context: Context) {
             if (p.id == profileId) p.copy(lastDownloadMbps = downloadMbps, lastUploadMbps = uploadMbps)
             else p
         }
-        saveProfiles()
+        saveProfilesAsync()
     }
 
     fun upsertSubscription(sub: Subscription) {
@@ -200,34 +230,35 @@ class AppRepository(context: Context) {
         val idx = list.indexOfFirst { it.id == sub.id }
         if (idx >= 0) list[idx] = sub else list.add(0, sub)
         _subscriptions.value = list
-        writeJson(subsFile, list)
+        writeJsonAsync(subsFile, list)
     }
 
     fun deleteSubscription(subId: String, removeNodes: Boolean = true) {
-        _subscriptions.value = _subscriptions.value.filterNot { it.id == subId }
-        writeJson(subsFile, _subscriptions.value)
+        val nextSubs = _subscriptions.value.filterNot { it.id == subId }
+        _subscriptions.value = nextSubs
+        writeJsonAsync(subsFile, nextSubs)
         if (removeNodes) {
             _profiles.value = _profiles.value.filterNot { it.subscriptionId == subId }
-            saveProfiles()
+            saveProfilesAsync()
         }
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val next = transform(_settings.value)
         _settings.value = next
-        writeJson(settingsFile, next)
+        writeJsonAsync(settingsFile, next)
     }
 
     fun addSpeedRecord(record: SpeedTestRecord) {
         val next = (listOf(record) + _speedHistory.value).take(50)
         _speedHistory.value = next
-        writeJson(historyFile, next)
+        writeJsonAsync(historyFile, next)
         updateProfileSpeed(record.profileId, record.downloadMbps, record.uploadMbps)
     }
 
     fun clearSpeedHistory() {
         _speedHistory.value = emptyList()
-        writeJson(historyFile, emptyList<SpeedTestRecord>())
+        writeJsonAsync(historyFile, emptyList<SpeedTestRecord>())
     }
 
     fun exportFullBackup(): String {
@@ -246,17 +277,18 @@ class AppRepository(context: Context) {
         _subscriptions.value = payload.subscriptions
         _settings.value = payload.settings
         _selectedProfileId.value = payload.selectedProfileId ?: payload.profiles.firstOrNull()?.id
-        saveProfiles()
-        writeJson(subsFile, _subscriptions.value)
-        writeJson(settingsFile, _settings.value)
-        saveSelectedId()
+        saveProfilesAsync()
+        writeJsonAsync(subsFile, _subscriptions.value)
+        writeJsonAsync(settingsFile, _settings.value)
+        saveSelectedIdAsync()
         LogBuffer.i("Backup", "Restored ${payload.profiles.size} profiles & settings")
         payload.profiles.size
     }
 
-    private fun saveProfiles() = writeJson(profilesFile, _profiles.value)
-    private fun saveSelectedId() {
-        runCatching { metaFile.writeText(_selectedProfileId.value.orEmpty()) }
+    private fun saveProfilesAsync() = writeJsonAsync(profilesFile, _profiles.value)
+    private fun saveSelectedIdAsync() {
+        val id = _selectedProfileId.value.orEmpty()
+        ioScope.launch { synchronized(fileLock) { writeTextSync(metaFile, id) } }
     }
 
     private inline fun <reified T> readJson(file: File): T? {
@@ -264,10 +296,22 @@ class AppRepository(context: Context) {
         return runCatching { json.decodeFromString<T>(file.readText()) }.getOrNull()
     }
 
-    private inline fun <reified T> writeJson(file: File, value: T) {
+    private inline fun <reified T> writeJsonAsync(file: File, value: T) {
+        val serialized = json.encodeToString(value)
+        ioScope.launch {
+            synchronized(fileLock) { writeTextSync(file, serialized) }
+        }
+    }
+
+    private inline fun <reified T> writeJsonSync(file: File, value: T) {
+        writeTextSync(file, json.encodeToString(value))
+    }
+
+    private fun writeTextSync(file: File, content: String) {
         runCatching {
-            val tmp = File(file.parentFile, "${file.name}.tmp")
-            tmp.writeText(json.encodeToString(value))
+            file.parentFile?.mkdirs()
+            val tmp = File(file.parentFile, "${file.name}.${UUID.randomUUID()}.tmp")
+            tmp.writeText(content)
             if (file.exists()) file.delete()
             tmp.renameTo(file)
         }

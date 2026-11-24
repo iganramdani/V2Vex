@@ -10,7 +10,6 @@ import com.v2vex.client.model.TransportType
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -22,7 +21,23 @@ object XrayConfigGenerator {
 
     private val prettyJson = Json { prettyPrint = true }
 
-    fun generate(profile: ServerProfile, settings: AppSettings): String {
+    private val FALLBACK_PRIVATE_CIDRS = listOf(
+        "10.0.0.0/8",
+        "127.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "::1/128",
+        "fc00::/7"
+    )
+
+    fun generate(
+        profile: ServerProfile,
+        settings: AppSettings,
+        hasGeoIp: Boolean = true,
+        hasGeoSite: Boolean = true,
+        chainProfile: ServerProfile? = null
+    ): String {
         if (profile.protocol == ProxyProtocol.RAW_JSON && profile.rawJson.isNotBlank()) {
             return profile.rawJson
         }
@@ -32,7 +47,7 @@ object XrayConfigGenerator {
                 put("loglevel", settings.logLevel)
             }
 
-            // Built-in Stats & Policy for high-accuracy live traffic tracking
+            // Built-in Stats & Policy
             putJsonObject("stats") {}
             putJsonObject("policy") {
                 putJsonObject("system") {
@@ -50,17 +65,27 @@ object XrayConfigGenerator {
                 }
             }
 
+            // Proper root FakeDNS pool when enabled (fixes Xray startup crash)
+            if (settings.dns.enableFakeDns) {
+                putJsonArray("fakedns") {
+                    add(buildJsonObject {
+                        put("ipPool", "198.18.0.0/15")
+                        put("poolSize", 65535)
+                    })
+                }
+            }
+
             // DNS Engine
-            put("dns", buildDns(settings))
+            put("dns", buildDns(settings, hasGeoSite))
 
             // Inbounds: Local SOCKS5 + HTTP + API
             put("inbounds", buildInbounds(settings))
 
-            // Outbounds: Active Proxy + optional Fragment dialerProxy + Direct + Block
-            put("outbounds", buildOutbounds(profile, settings))
+            // Outbounds: Primary Proxy + optional Chain Hop + optional Fragment + Direct + Block
+            put("outbounds", buildOutbounds(profile, settings, chainProfile))
 
-            // Routing Engine
-            put("routing", buildRouting(settings))
+            // Routing Engine (with safe GeoData fallbacks)
+            put("routing", buildRouting(settings, hasGeoIp, hasGeoSite))
         }
 
         return prettyJson.encodeToString(JsonObject.serializer(), root)
@@ -71,7 +96,7 @@ object XrayConfigGenerator {
         Unit
     }
 
-    private fun buildDns(settings: AppSettings): JsonObject = buildJsonObject {
+    private fun buildDns(settings: AppSettings, hasGeoSite: Boolean): JsonObject = buildJsonObject {
         put("queryStrategy", settings.dns.queryStrategy)
         putJsonArray("servers") {
             if (settings.dns.enableFakeDns) {
@@ -83,7 +108,7 @@ object XrayConfigGenerator {
             if (settings.dns.backupDns.isNotBlank()) {
                 add(settings.dns.backupDns)
             }
-            if (settings.dns.directDns.isNotBlank()) {
+            if (settings.dns.directDns.isNotBlank() && hasGeoSite) {
                 add(buildJsonObject {
                     put("address", settings.dns.directDns)
                     putJsonArray("domains") {
@@ -97,7 +122,6 @@ object XrayConfigGenerator {
     private fun buildInbounds(settings: AppSettings): JsonArray = buildJsonArray {
         val listenAddr = if (settings.allowLan) "0.0.0.0" else "127.0.0.1"
 
-        // SOCKS5 inbound
         add(buildJsonObject {
             put("tag", "socks-in")
             put("port", settings.socksPort)
@@ -110,7 +134,6 @@ object XrayConfigGenerator {
             put("sniffing", buildSniffing(settings))
         })
 
-        // HTTP inbound
         add(buildJsonObject {
             put("tag", "http-in")
             put("port", settings.httpPort)
@@ -119,7 +142,6 @@ object XrayConfigGenerator {
             put("sniffing", buildSniffing(settings))
         })
 
-        // Local Stats API inbound
         add(buildJsonObject {
             put("tag", "api-in")
             put("port", settings.apiPort)
@@ -132,41 +154,59 @@ object XrayConfigGenerator {
     }
 
     private fun buildSniffing(settings: AppSettings): JsonObject = buildJsonObject {
-        put("enabled", settings.sniffing.enabled)
+        put("enabled", settings.sniffing.enabled || settings.dns.enableFakeDns)
         putJsonArray("destOverride") {
             if (settings.sniffing.destOverrideHttp) add("http")
             if (settings.sniffing.destOverrideTls) add("tls")
             if (settings.sniffing.destOverrideQuic) add("quic")
-            if (settings.sniffing.destOverrideFakeDns) add("fakedns")
+            if (settings.sniffing.destOverrideFakeDns || settings.dns.enableFakeDns) add("fakedns")
         }
         put("routeOnly", settings.sniffing.routeOnly)
     }
 
-    private fun buildOutbounds(profile: ServerProfile, settings: AppSettings): JsonArray = buildJsonArray {
+    private fun buildOutbounds(
+        profile: ServerProfile,
+        settings: AppSettings,
+        chainProfile: ServerProfile?
+    ): JsonArray = buildJsonArray {
         val useFragment = settings.fragment.enabled &&
-            profile.protocol != ProxyProtocol.WIREGUARD
+            profile.protocol != ProxyProtocol.WIREGUARD &&
+            chainProfile == null
 
-        // Primary proxy outbound
-        add(buildPrimaryOutbound(profile, settings, useFragment))
+        val useChain = chainProfile != null &&
+            chainProfile.id != profile.id &&
+            chainProfile.protocol != ProxyProtocol.RAW_JSON
 
-        // Optional DPI-bypass Fragment dialerProxy outbound
-        if (useFragment) {
-            add(buildJsonObject {
-                put("tag", "fragment")
-                put("protocol", "freedom")
-                putJsonObject("settings") {
-                    putJsonObject("fragment") {
-                        put("packets", settings.fragment.packets.ifBlank { "tlshello" })
-                        put("length", settings.fragment.length.ifBlank { "10-20" })
-                        put("interval", settings.fragment.interval.ifBlank { "10-20" })
-                    }
+        // Primary proxy outbound (if chained, dials through "proxy-hop")
+        add(
+            buildOutbound(
+                tag = "proxy",
+                profile = profile,
+                settings = settings,
+                dialerProxyTag = when {
+                    useChain -> "proxy-hop"
+                    useFragment -> "fragment"
+                    else -> null
                 }
-                putJsonObject("streamSettings") {
-                    putJsonObject("sockopt") {
-                        put("tcpNoDelay", true)
-                    }
-                }
-            })
+            )
+        )
+
+        // Optional Multi-Hop Chain outbound
+        if (useChain && chainProfile != null) {
+            val hopFragment = settings.fragment.enabled && chainProfile.protocol != ProxyProtocol.WIREGUARD
+            add(
+                buildOutbound(
+                    tag = "proxy-hop",
+                    profile = chainProfile,
+                    settings = settings,
+                    dialerProxyTag = if (hopFragment) "fragment" else null
+                )
+            )
+            if (hopFragment) {
+                add(buildFragmentOutbound(settings))
+            }
+        } else if (useFragment) {
+            add(buildFragmentOutbound(settings))
         }
 
         // Direct outbound
@@ -190,12 +230,30 @@ object XrayConfigGenerator {
         })
     }
 
-    private fun buildPrimaryOutbound(
+    private fun buildFragmentOutbound(settings: AppSettings): JsonObject = buildJsonObject {
+        put("tag", "fragment")
+        put("protocol", "freedom")
+        putJsonObject("settings") {
+            putJsonObject("fragment") {
+                put("packets", settings.fragment.packets.ifBlank { "tlshello" })
+                put("length", settings.fragment.length.ifBlank { "10-20" })
+                put("interval", settings.fragment.interval.ifBlank { "10-20" })
+            }
+        }
+        putJsonObject("streamSettings") {
+            putJsonObject("sockopt") {
+                put("tcpNoDelay", true)
+            }
+        }
+    }
+
+    private fun buildOutbound(
+        tag: String,
         profile: ServerProfile,
         settings: AppSettings,
-        useFragment: Boolean
+        dialerProxyTag: String?
     ): JsonObject = buildJsonObject {
-        put("tag", "proxy")
+        put("tag", tag)
         when (profile.protocol) {
             ProxyProtocol.VLESS -> {
                 put("protocol", "vless")
@@ -335,10 +393,10 @@ object XrayConfigGenerator {
         }
 
         if (profile.protocol != ProxyProtocol.WIREGUARD) {
-            put("streamSettings", buildStreamSettings(profile, useFragment))
+            put("streamSettings", buildStreamSettings(profile, dialerProxyTag))
         }
 
-        // Mux.Cool (disabled automatically when XTLS-Vision flow is active, per Xray spec)
+        // Mux.Cool (auto-disabled when XTLS-Vision flow is active)
         if (settings.mux.enabled && profile.flow.isBlank() && profile.protocol != ProxyProtocol.WIREGUARD) {
             putJsonObject("mux") {
                 put("enabled", true)
@@ -349,7 +407,7 @@ object XrayConfigGenerator {
         }
     }
 
-    private fun buildStreamSettings(profile: ServerProfile, useFragment: Boolean): JsonObject = buildJsonObject {
+    private fun buildStreamSettings(profile: ServerProfile, dialerProxyTag: String?): JsonObject = buildJsonObject {
         put("network", profile.transport.xrayName)
         put("security", profile.security.xrayName)
 
@@ -384,9 +442,7 @@ object XrayConfigGenerator {
                 putJsonObject("wsSettings") {
                     put("path", profile.path.ifBlank { "/" })
                     if (profile.host.isNotBlank()) {
-                        putJsonObject("headers") {
-                            put("Host", profile.host)
-                        }
+                        putJsonObject("headers") { put("Host", profile.host) }
                     }
                 }
             }
@@ -419,9 +475,7 @@ object XrayConfigGenerator {
             }
             TransportType.KCP -> {
                 putJsonObject("kcpSettings") {
-                    putJsonObject("header") {
-                        put("type", profile.headerType.ifBlank { "none" })
-                    }
+                    putJsonObject("header") { put("type", profile.headerType.ifBlank { "none" }) }
                 }
             }
             TransportType.TCP -> {
@@ -443,27 +497,31 @@ object XrayConfigGenerator {
             }
         }
 
-        if (useFragment) {
+        if (!dialerProxyTag.isNullOrBlank()) {
             putJsonObject("sockopt") {
-                put("dialerProxy", "fragment")
+                put("dialerProxy", dialerProxyTag)
                 put("tcpNoDelay", true)
             }
         }
     }
 
-    private fun buildRouting(settings: AppSettings): JsonObject = buildJsonObject {
+    private fun buildRouting(settings: AppSettings, hasGeoIp: Boolean, hasGeoSite: Boolean): JsonObject = buildJsonObject {
         put("domainStrategy", settings.domainStrategy)
         putJsonArray("rules") {
-            // Route local API inbound to stats API
             add(buildJsonObject {
                 put("type", "field")
                 putJsonArray("inboundTag") { add("api-in") }
                 put("outboundTag", "api")
             })
 
-            // User-defined custom rules (highest priority)
+            // User-defined custom rules
             settings.customRules.filter { it.enabled && it.values.isNotBlank() }.forEach { rule ->
-                val items = rule.values.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                val items = rule.values.split(",").map { it.trim() }.filter { item ->
+                    if (item.isEmpty()) false
+                    else if (item.startsWith("geoip:") && !hasGeoIp) false
+                    else if (item.startsWith("geosite:") && !hasGeoSite) false
+                    else true
+                }
                 if (items.isNotEmpty()) {
                     add(buildJsonObject {
                         put("type", "field")
@@ -478,25 +536,33 @@ object XrayConfigGenerator {
                 }
             }
 
-            // Preset rules
+            // Preset rules with safe CIDR fallback when GeoData is not yet downloaded
             when (settings.routingPreset) {
                 RoutingPreset.GLOBAL -> Unit
                 RoutingPreset.BYPASS_LAN -> {
                     add(buildJsonObject {
                         put("type", "field")
-                        putJsonArray("ip") { add("geoip:private") }
+                        putJsonArray("ip") {
+                            if (hasGeoIp) add("geoip:private")
+                            else FALLBACK_PRIVATE_CIDRS.forEach { add(it) }
+                        }
                         put("outboundTag", "direct")
                     })
                 }
                 RoutingPreset.ADBLOCK_BYPASS_LAN -> {
+                    if (hasGeoSite) {
+                        add(buildJsonObject {
+                            put("type", "field")
+                            putJsonArray("domain") { add("geosite:category-ads-all") }
+                            put("outboundTag", "block")
+                        })
+                    }
                     add(buildJsonObject {
                         put("type", "field")
-                        putJsonArray("domain") { add("geosite:category-ads-all") }
-                        put("outboundTag", "block")
-                    })
-                    add(buildJsonObject {
-                        put("type", "field")
-                        putJsonArray("ip") { add("geoip:private") }
+                        putJsonArray("ip") {
+                            if (hasGeoIp) add("geoip:private")
+                            else FALLBACK_PRIVATE_CIDRS.forEach { add(it) }
+                        }
                         put("outboundTag", "direct")
                     })
                 }

@@ -10,8 +10,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,10 +71,10 @@ fun LogsScreen(
                     clipboard.setText(AnnotatedString(LogBuffer.dumpText()))
                     onCopied()
                 }) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = "Copy Logs")
+                    Icon(Icons.Rounded.Share, contentDescription = "Copy Logs")
                 }
                 IconButton(onClick = { LogBuffer.clear() }) {
-                    Icon(Icons.Rounded.DeleteSweep, contentDescription = "Clear Logs")
+                    Icon(Icons.Rounded.Delete, contentDescription = "Clear Logs")
                 }
             }
         }

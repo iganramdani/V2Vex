@@ -111,8 +111,9 @@ data class AppSettings(
     val allowLan: Boolean = false,
     val enableIpv6: Boolean = false,
     val vpnMtu: Int = 1500,
-    val preferTunMode: Boolean = true,
-    val autoReconnect: Boolean = true,
+
+    // Multi-Hop Proxy Chain (optional secondary node ID)
+    val chainProfileId: String? = null,
 
     // Routing
     val routingPreset: RoutingPreset = RoutingPreset.BYPASS_LAN,

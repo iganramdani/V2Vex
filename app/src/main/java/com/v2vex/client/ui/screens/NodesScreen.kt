@@ -19,16 +19,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.List
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.Create
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.RssFeed
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -184,7 +183,7 @@ fun NodesScreen(
             }
             Row {
                 IconButton(onClick = { showSubDialog = true }) {
-                    Icon(Icons.Rounded.RssFeed, contentDescription = "Subscriptions", tint = XrayCyan)
+                    Icon(Icons.AutoMirrored.Rounded.List, contentDescription = "Subscriptions", tint = XrayCyan)
                 }
                 IconButton(onClick = {
                     val clipText = clipboard.getText()?.text.orEmpty()
@@ -195,7 +194,7 @@ fun NodesScreen(
                         showImportDialog = true
                     }
                 }) {
-                    Icon(Icons.Rounded.ContentPaste, contentDescription = "Paste Clipboard")
+                    Icon(Icons.Rounded.Create, contentDescription = "Paste Clipboard")
                 }
                 IconButton(onClick = { editingProfile = ServerProfile() }) {
                     Icon(Icons.Rounded.Add, contentDescription = "Add Node", tint = XrayEmerald)
@@ -237,7 +236,7 @@ fun NodesScreen(
                     if (isTestingBatch) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Rounded.NetworkCheck, contentDescription = null, modifier = Modifier.size(16.dp), tint = XrayCyan)
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp), tint = XrayCyan)
                     }
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Test All RTT", style = MaterialTheme.typography.labelMedium)
@@ -256,7 +255,7 @@ fun NodesScreen(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp), tint = XrayEmerald)
+                    Icon(Icons.Rounded.Star, contentDescription = null, modifier = Modifier.size(16.dp), tint = XrayEmerald)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Auto Fastest", style = MaterialTheme.typography.labelMedium, color = XrayEmerald)
                 }
@@ -419,7 +418,7 @@ private fun NodeCard(
                 horizontalArrangement = Arrangement.End
             ) {
                 IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = "Copy URI", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.Share, contentDescription = "Copy URI", modifier = Modifier.size(18.dp))
                 }
                 IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Rounded.Edit, contentDescription = "Edit", modifier = Modifier.size(18.dp))

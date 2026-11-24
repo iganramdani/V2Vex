@@ -23,14 +23,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * High-accuracy multi-stream Mbps SpeedTest Engine.
+ * SpeedLab v2 — Lab-Grade Multi-Stream Mbps Benchmark Engine.
  *
- * Accuracy techniques:
- * 1. Monotonic nanosecond clock (System.nanoTime()) immune to wall-clock drift.
- * 2. Warm-up phase discard (excludes TLS handshake & TCP slow-start ramp).
- * 3. Parallel multi-stream HTTP/HTTPS sockets (saturates high-bandwidth BDP links).
- * 4. 100ms sliding-window sampling + trimmed mean (rejects burst outliers).
- * 5. RFC 3550-style consecutive-difference jitter over 5 HTTP TTFB probes.
+ * Fixes from Brutal Audit:
+ * 1. Keep-Alive True RTT & Jitter: warms up 1 TLS connection first, then probes 6 consecutive
+ *    HEAD requests over the warm socket (no TLS handshake inflation!).
+ * 2. Server-ACK Upload Throughput: measures complete request->HTTP-200 round-trips for
+ *    progressive chunks (eliminates local TCP send-buffer false spikes!).
+ * 3. Multi-Stream Download with warm-up discard + trimmed mean + monotonic System.nanoTime().
  */
 class SpeedTestEngine {
 
@@ -50,31 +50,33 @@ class SpeedTestEngine {
         val endpointHost = runCatching { URI(settings.downloadUrl).host ?: "custom" }.getOrDefault("custom")
 
         try {
-            // Phase 1: Ping & Jitter (5 probes)
+            // Phase 1: Warm Keep-Alive Ping & RFC 3550 Jitter
             onProgress(
                 SpeedTestProgress(
                     phase = SpeedTestPhase.PING,
-                    progressFraction = 0.05f,
-                    statusDetail = "Probing latency & jitter (${if (useProxy) "via tunnel" else "direct"})..."
+                    progressFraction = 0.04f,
+                    statusDetail = "Warming TLS socket (${if (useProxy) "via tunnel" else "direct"})..."
                 )
             )
+            // Warm-up probe (discarded — absorbs DNS + TCP + TLS handshake)
+            measureKeepAliveRttMs(settings.pingUrl, proxy)
 
             val rtts = mutableListOf<Double>()
-            repeat(5) { idx ->
-                val rtt = measureHttpRttMs(settings.pingUrl, proxy)
+            repeat(6) { idx ->
+                val rtt = measureKeepAliveRttMs(settings.pingUrl, proxy)
                 if (rtt != null) rtts.add(rtt)
                 val avg = if (rtts.isNotEmpty()) rtts.average() else 0.0
                 val jit = SpeedMath.computeJitterMs(rtts)
                 onProgress(
                     SpeedTestProgress(
                         phase = SpeedTestPhase.PING,
-                        progressFraction = 0.05f + ((idx + 1) / 5f) * 0.15f,
+                        progressFraction = 0.05f + ((idx + 1) / 6f) * 0.15f,
                         pingMs = avg,
                         jitterMs = jit,
-                        statusDetail = "Ping sample ${idx + 1}/5: ${String.format("%.1f ms", rtt ?: 0.0)}"
+                        statusDetail = "True RTT ${idx + 1}/6: ${String.format("%.1f ms", rtt ?: 0.0)}"
                     )
                 )
-                delay(120)
+                delay(100)
             }
 
             val finalPing = if (rtts.isNotEmpty()) rtts.average() else 0.0
@@ -106,14 +108,12 @@ class SpeedTestEngine {
                 )
             }
 
-            // Phase 3: Multi-Stream Upload
-            val ulResult = measureMultiStreamUpload(
+            // Phase 3: Server-ACK Multi-Stream Upload (no local socket buffer bias!)
+            val ulResult = measureServerAckUpload(
                 urlStr = settings.uploadUrl,
                 proxy = proxy,
                 streams = (settings.parallelStreams / 2).coerceIn(1, 4),
-                durationSec = (settings.durationSeconds - 2).coerceIn(3, 15),
-                warmupMs = (settings.warmupMillis / 2).coerceIn(300L, 2000L),
-                chunkMb = settings.uploadPayloadMb.coerceIn(2, 16)
+                durationSec = (settings.durationSeconds - 1).coerceIn(4, 15)
             ) { currentMbps, peakMbps, frac, bytes, samples ->
                 onProgress(
                     SpeedTestProgress(
@@ -129,7 +129,7 @@ class SpeedTestEngine {
                         activeStreams = (settings.parallelStreams / 2).coerceIn(1, 4),
                         bytesTransferred = dlResult.totalBytes + bytes,
                         liveSamplesMbps = samples.takeLast(40),
-                        statusDetail = "Uploading · ${SpeedMath.formatBytes(bytes)}"
+                        statusDetail = "Server-ACK Upload · ${SpeedMath.formatBytes(bytes)}"
                     )
                 )
             }
@@ -161,14 +161,14 @@ class SpeedTestEngine {
                     stabilityPercent = dlResult.stabilityPercent,
                     bytesTransferred = dlResult.totalBytes + ulResult.totalBytes,
                     liveSamplesMbps = dlResult.samples.takeLast(40),
-                    statusDetail = "Benchmark complete · ${String.format("%.2f", dlResult.sustainedMbps)} Mbps ↓ / ${String.format("%.2f", ulResult.sustainedMbps)} Mbps ↑"
+                    statusDetail = "Done · ${String.format("%.2f", dlResult.sustainedMbps)} Mbps ↓ / ${String.format("%.2f", ulResult.sustainedMbps)} Mbps ↑"
                 )
             )
 
             LogBuffer.i(
                 "SpeedLab",
-                "Done [$profileName]: DL=${String.format("%.2f", record.downloadMbps)} Mbps (peak ${String.format("%.2f", record.peakDownloadMbps)}), " +
-                    "UL=${String.format("%.2f", record.uploadMbps)} Mbps, Ping=${String.format("%.1f", record.pingMs)}ms, Jitter=${String.format("%.1f", record.jitterMs)}ms"
+                "Done [$profileName]: DL=${String.format("%.2f", record.downloadMbps)} Mbps, " +
+                    "UL=${String.format("%.2f", record.uploadMbps)} Mbps, RTT=${String.format("%.1f", record.pingMs)}ms, Jitter=${String.format("%.1f", record.jitterMs)}ms"
             )
             record
         } catch (ce: CancellationException) {
@@ -186,24 +186,25 @@ class SpeedTestEngine {
         }
     }
 
-    private fun measureHttpRttMs(urlStr: String, proxy: Proxy): Double? {
-        var conn: HttpURLConnection? = null
+    /**
+     * Measures pure HTTP RTT using Connection: keep-alive so HttpURLConnection reuses the warm TLS socket.
+     */
+    private fun measureKeepAliveRttMs(urlStr: String, proxy: Proxy): Double? {
         return try {
             val start = System.nanoTime()
-            conn = (URL(urlStr).openConnection(proxy) as HttpURLConnection).apply {
+            val conn = (URL(urlStr).openConnection(proxy) as HttpURLConnection).apply {
                 requestMethod = "HEAD"
                 connectTimeout = 5000
                 readTimeout = 5000
                 useCaches = false
                 setRequestProperty("Cache-Control", "no-cache")
-                setRequestProperty("Connection", "close")
+                setRequestProperty("Connection", "keep-alive")
             }
             conn.responseCode
+            runCatching { conn.inputStream.close() }
             (System.nanoTime() - start) / 1_000_000.0
         } catch (_: Throwable) {
             null
-        } finally {
-            conn?.disconnect()
         }
     }
 
@@ -303,24 +304,24 @@ class SpeedTestEngine {
         )
     }
 
-    private suspend fun measureMultiStreamUpload(
+    /**
+     * Server-ACK Upload: only credits bytes AFTER the remote server returns HTTP 2xx,
+     * eliminating local socket/proxy buffer bias.
+     */
+    private suspend fun measureServerAckUpload(
         urlStr: String,
         proxy: Proxy,
         streams: Int,
         durationSec: Int,
-        warmupMs: Long,
-        chunkMb: Int,
         onTick: (currentMbps: Double, peakMbps: Double, progress: Float, totalBytes: Long, samples: List<Double>) -> Unit
     ): TransferResult = coroutineScope {
-        val totalBytes = AtomicLong(0L)
+        val ackedBytes = AtomicLong(0L)
         val stopSignal = AtomicBoolean(false)
         val startNs = System.nanoTime()
-        val warmupEndNs = startNs + warmupMs * 1_000_000L
         val endNs = startNs + durationSec * 1_000_000_000L
 
-        // Pre-generate 64KB non-compressible random block once (zero GC pressure during upload)
-        val randomBlock = ByteArray(64 * 1024).also { Random(42L).nextBytes(it) }
-        val payloadBytesPerReq = chunkMb * 1024L * 1024L
+        // Pre-allocate 512KB non-compressible payload chunk
+        val chunk = ByteArray(512 * 1024).also { Random(99L).nextBytes(it) }
 
         val workers = List(streams) {
             async(Dispatchers.IO) {
@@ -331,21 +332,21 @@ class SpeedTestEngine {
                             requestMethod = "POST"
                             doOutput = true
                             connectTimeout = 6000
-                            readTimeout = 6000
+                            readTimeout = 8000
                             useCaches = false
-                            setChunkedStreamingMode(64 * 1024)
+                            setFixedLengthStreamingMode(chunk.size)
                             setRequestProperty("Content-Type", "application/octet-stream")
+                            setRequestProperty("Connection", "keep-alive")
                         }
                         conn.outputStream.use { out ->
-                            var sent = 0L
-                            while (!stopSignal.get() && isActive && System.nanoTime() < endNs && sent < payloadBytesPerReq) {
-                                out.write(randomBlock)
-                                sent += randomBlock.size
-                                totalBytes.addAndGet(randomBlock.size.toLong())
-                            }
+                            out.write(chunk)
                             out.flush()
                         }
-                        runCatching { conn.responseCode }
+                        val code = conn.responseCode
+                        runCatching { conn.inputStream.close() }
+                        if (code in 200..299) {
+                            ackedBytes.addAndGet(chunk.size.toLong())
+                        }
                     } catch (_: Throwable) {
                         delay(150)
                     } finally {
@@ -355,28 +356,28 @@ class SpeedTestEngine {
             }
         }
 
-        val steadySamples = mutableListOf<Double>()
+        val samples = mutableListOf<Double>()
         var peakMbps = 0.0
         var prevBytes = 0L
         var prevNs = startNs
 
         val sampler = launch {
             while (isActive && System.nanoTime() < endNs) {
-                delay(150)
+                delay(300)
                 val nowNs = System.nanoTime()
-                val curBytes = totalBytes.get()
+                val curBytes = ackedBytes.get()
                 val deltaBytes = (curBytes - prevBytes).coerceAtLeast(0L)
                 val deltaNs = (nowNs - prevNs).coerceAtLeast(1L)
                 val instMbps = SpeedMath.bytesToMbps(deltaBytes, deltaNs)
                 prevBytes = curBytes
                 prevNs = nowNs
 
-                if (nowNs >= warmupEndNs && instMbps > 0.0) {
-                    steadySamples.add(instMbps)
+                if (instMbps > 0.0) {
+                    samples.add(instMbps)
                     if (instMbps > peakMbps) peakMbps = instMbps
                 }
                 val frac = ((nowNs - startNs).toFloat() / (durationSec * 1_000_000_000f)).coerceIn(0f, 1f)
-                onTick(instMbps, peakMbps, frac, curBytes, steadySamples.toList())
+                onTick(instMbps, peakMbps, frac, curBytes, samples.toList())
             }
             stopSignal.set(true)
         }
@@ -385,17 +386,17 @@ class SpeedTestEngine {
         workers.forEach { it.cancel() }
         runCatching { workers.awaitAll() }
 
-        val sustained = if (steadySamples.isNotEmpty()) {
-            SpeedMath.trimmedMeanMbps(steadySamples)
+        val sustained = if (samples.isNotEmpty()) {
+            SpeedMath.trimmedMeanMbps(samples)
         } else {
-            SpeedMath.bytesToMbps(totalBytes.get(), System.nanoTime() - startNs)
+            SpeedMath.bytesToMbps(ackedBytes.get(), System.nanoTime() - startNs)
         }
         TransferResult(
             sustainedMbps = sustained,
             peakMbps = maxOf(peakMbps, sustained),
-            stabilityPercent = SpeedMath.computeStabilityPercent(steadySamples),
-            totalBytes = totalBytes.get(),
-            samples = steadySamples
+            stabilityPercent = SpeedMath.computeStabilityPercent(samples),
+            totalBytes = ackedBytes.get(),
+            samples = samples
         )
     }
 }

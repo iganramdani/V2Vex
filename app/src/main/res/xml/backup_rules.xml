@@ -2,4 +2,5 @@
 <full-backup-content>
     <exclude domain="file" path="core/" />
     <exclude domain="file" path="assets/" />
+    <exclude domain="file" path="store/" />
 </full-backup-content>

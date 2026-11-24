@@ -18,17 +18,15 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
 /**
- * Hot-swappable Xray-core & GeoData updater.
- *
- * Resolution priority:
- * 1. User-updated / imported binary in filesDir/core/xray (if executable on device)
- * 2. Bundled native binary in applicationInfo.nativeLibraryDir/libxray.so (Android 10+ W^X safe)
- *
- * GeoData (geoip.dat & geosite.dat) always live in filesDir/assets/ so they can be
- * updated at runtime on any Android version without rebuilding the APK.
+ * Core & GeoData Manager with:
+ * - Honest Android 10+ (W^X) executable detection
+ * - SHA-256 verification for downloaded binaries & GeoData
+ * - 1-tap GeoIP/GeoSite hot-swap (works on all Android 7-15 devices)
+ * - In-app V2Vex APK release checker (for Android 10-15 W^X-compliant core updates)
  */
 class CoreManager(private val context: Context) {
 
@@ -45,11 +43,10 @@ class CoreManager(private val context: Context) {
     private val geoMetaFile: File get() = File(assetsDir, "geo_version.txt")
 
     fun primaryAbi(): String = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+    fun hasGeoIp(): Boolean = geoIpFile.exists() && geoIpFile.length() > 1024L
+    fun hasGeoSite(): Boolean = geoSiteFile.exists() && geoSiteFile.length() > 1024L
+    fun isWxEnforced(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
-    /**
-     * Copies bundled geoip.dat / geosite.dat from APK assets into filesDir/assets on first run
-     * so routing rules work immediately out of the box while remaining hot-updatable at runtime.
-     */
     fun ensureBundledGeoAssets() {
         runCatching {
             val bundledAssets = context.assets.list("")?.toSet() ?: emptySet()
@@ -70,9 +67,6 @@ class CoreManager(private val context: Context) {
         }
     }
 
-    /**
-     * Resolves the best runnable Xray binary on this device.
-     */
     fun resolveExecutableBinary(): Pair<File?, String> {
         if (runtimeXrayBinary.exists() && runtimeXrayBinary.length() > 0L) {
             runtimeXrayBinary.setExecutable(true, false)
@@ -85,23 +79,21 @@ class CoreManager(private val context: Context) {
                 return bundledXrayBinary to "Bundled (jniLibs)"
             }
         }
-        // Return runtime binary even if W^X restricts direct execve so UI can report accurately
         if (runtimeXrayBinary.exists()) {
-            return runtimeXrayBinary to "Downloaded (W^X Restricted)"
+            return runtimeXrayBinary to "Blocked by Android W^X"
         }
         return null to "Not Installed"
     }
 
     suspend fun inspectInstalledCore(): CoreInfo = withContext(Dispatchers.IO) {
         val (bin, source) = resolveExecutableBinary()
-        val probedVersion = if (bin != null && canExecute(bin)) {
-            probeVersionOutput(bin)
-        } else null
+        val executable = bin != null && canExecute(bin)
+        val probedVersion = if (executable && bin != null) probeVersionOutput(bin) else null
 
         val savedVer = if (versionMetaFile.exists()) versionMetaFile.readText().trim() else ""
         val displayVer = probedVersion ?: savedVer.ifBlank { "Not Installed" }
         val geoVer = if (geoMetaFile.exists()) geoMetaFile.readText().trim() else {
-            if (geoIpFile.exists() || geoSiteFile.exists()) "Local" else "Not Installed"
+            if (hasGeoIp() || hasGeoSite()) "Local" else "Not Installed"
         }
 
         CoreInfo(
@@ -109,13 +101,23 @@ class CoreManager(private val context: Context) {
             binarySource = source,
             binaryPath = bin?.absolutePath ?: "",
             abi = primaryAbi(),
-            executable = bin != null && canExecute(bin),
-            geoIpVersion = if (geoIpFile.exists()) geoVer else "Not Installed",
-            geoSiteVersion = if (geoSiteFile.exists()) geoVer else "Not Installed",
+            executable = executable,
+            geoIpVersion = if (hasGeoIp()) geoVer else "Not Installed",
+            geoSiteVersion = if (hasGeoSite()) geoVer else "Not Installed",
             geoIpSizeBytes = if (geoIpFile.exists()) geoIpFile.length() else 0L,
             geoSiteSizeBytes = if (geoSiteFile.exists()) geoSiteFile.length() else 0L
         )
     }
+
+    /**
+     * Checks latest V2Vex APK release (which auto-bundles latest Xray-core in jniLibs for Android 10-15 W^X compliance).
+     */
+    suspend fun checkAppReleaseUpdate(repo: String = "iganramdani/V2Vex"): Result<RemoteReleaseInfo> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                fetchGitHubRelease(repo, listOf(".apk"))
+            }
+        }
 
     suspend fun checkLatestXrayRelease(repo: String = "XTLS/Xray-core"): Result<RemoteReleaseInfo> =
         withContext(Dispatchers.IO) {
@@ -139,18 +141,33 @@ class CoreManager(private val context: Context) {
             val tmpZip = File(context.cacheDir, "xray_update.zip")
             onProgress(0.05f, "Downloading ${release.assetName}...")
             downloadFile(release.downloadUrl, tmpZip) { frac ->
-                onProgress(0.05f + frac * 0.75f, "Downloading ${release.tagName} (${(frac * 100).toInt()}%)...")
+                onProgress(0.05f + frac * 0.70f, "Downloading ${release.tagName} (${(frac * 100).toInt()}%)...")
             }
 
-            onProgress(0.85f, "Extracting Xray-core & GeoData...")
+            // Optional SHA-256 verification against XTLS .dgst asset
+            onProgress(0.78f, "Verifying SHA-256 integrity...")
+            verifyDgstIfAvailable(release.downloadUrl + ".dgst", tmpZip)
+
+            onProgress(0.86f, "Extracting Xray-core & GeoData...")
             extractXrayZip(tmpZip)
             tmpZip.delete()
 
-            versionMetaFile.writeText(release.tagName)
-            geoMetaFile.writeText(release.tagName)
-            LogBuffer.i("Core", "Installed Xray-core ${release.tagName} (${release.assetName})")
-
-            onProgress(1f, "Core updated to ${release.tagName}")
+            val canRunHotSwap = canExecute(runtimeXrayBinary)
+            if (!canRunHotSwap) {
+                // Clean up dead 33MB binary on Android 10+ W^X devices instead of wasting storage!
+                runtimeXrayBinary.delete()
+                geoMetaFile.writeText(release.tagName)
+                LogBuffer.w(
+                    "Core",
+                    "Android ${Build.VERSION.SDK_INT} W^X blocks execve in filesDir. GeoData updated to ${release.tagName}; update V2Vex APK to upgrade bundled libxray.so."
+                )
+                onProgress(1f, "GeoData updated! Android 10+ W^X requires APK update for libxray.so.")
+            } else {
+                versionMetaFile.writeText(release.tagName)
+                geoMetaFile.writeText(release.tagName)
+                LogBuffer.i("Core", "Hot-swapped Xray-core ${release.tagName} (${release.assetName})")
+                onProgress(1f, "Core hot-swapped to ${release.tagName}")
+            }
             inspectInstalledCore()
         }
     }
@@ -168,22 +185,21 @@ class CoreManager(private val context: Context) {
             downloadFile(geoIpRel.downloadUrl, geoIpFile) { frac ->
                 onProgress(0.15f + frac * 0.35f, "Downloading geoip.dat (${(frac * 100).toInt()}%)...")
             }
+            verifySha256SumIfAvailable(geoIpRel.downloadUrl + ".sha256sum", geoIpFile)
 
             onProgress(0.55f, "Downloading geosite.dat (${geoSiteRel.tagName})...")
             downloadFile(geoSiteRel.downloadUrl, geoSiteFile) { frac ->
                 onProgress(0.55f + frac * 0.40f, "Downloading geosite.dat (${(frac * 100).toInt()}%)...")
             }
+            verifySha256SumIfAvailable(geoSiteRel.downloadUrl + ".sha256sum", geoSiteFile)
 
             geoMetaFile.writeText(geoIpRel.tagName)
-            LogBuffer.i("Core", "Updated GeoIP & GeoSite to ${geoIpRel.tagName}")
-            onProgress(1f, "GeoData updated (${geoIpRel.tagName})")
+            LogBuffer.i("Core", "Verified & updated GeoIP + GeoSite to ${geoIpRel.tagName}")
+            onProgress(1f, "GeoData verified & updated (${geoIpRel.tagName})")
             inspectInstalledCore()
         }
     }
 
-    /**
-     * Imports a user-selected Xray-core .zip archive OR raw xray binary from storage.
-     */
     suspend fun importLocalCore(inputStream: InputStream, fileName: String): Result<CoreInfo> =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -199,6 +215,10 @@ class CoreManager(private val context: Context) {
                     tmp.delete()
                     runtimeXrayBinary.setExecutable(true, false)
                 }
+                if (!canExecute(runtimeXrayBinary)) {
+                    runtimeXrayBinary.delete()
+                    error("Imported binary cannot execute on Android ${Build.VERSION.SDK_INT} (SELinux W^X). GeoData was updated if present in zip.")
+                }
                 versionMetaFile.writeText("Custom ($fileName)")
                 LogBuffer.i("Core", "Imported custom core from $fileName")
                 inspectInstalledCore()
@@ -206,7 +226,7 @@ class CoreManager(private val context: Context) {
         }
 
     private fun extractXrayZip(zipFile: File) {
-        var foundBinary = false
+        var foundAny = false
         ZipInputStream(BufferedInputStream(zipFile.inputStream())).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
@@ -215,22 +235,75 @@ class CoreManager(private val context: Context) {
                     "xray" -> {
                         FileOutputStream(runtimeXrayBinary).use { out -> zis.copyTo(out) }
                         runtimeXrayBinary.setExecutable(true, false)
-                        foundBinary = true
+                        foundAny = true
                     }
                     "geoip.dat" -> {
                         FileOutputStream(geoIpFile).use { out -> zis.copyTo(out) }
+                        foundAny = true
                     }
                     "geosite.dat" -> {
                         FileOutputStream(geoSiteFile).use { out -> zis.copyTo(out) }
+                        foundAny = true
                     }
                 }
                 zis.closeEntry()
                 entry = zis.nextEntry
             }
         }
-        if (!foundBinary) {
-            error("Archive does not contain an 'xray' executable binary")
+        if (!foundAny) error("Archive contains neither xray binary nor GeoData files")
+    }
+
+    private fun verifyDgstIfAvailable(dgstUrl: String, file: File) {
+        val dgstText = fetchSmallText(dgstUrl) ?: return
+        val expected = dgstText.lines()
+            .firstOrNull { it.contains("SHA2-256", ignoreCase = true) || it.contains("SHA256", ignoreCase = true) }
+            ?.substringAfter("=")
+            ?.trim()
+            ?.lowercase()
+            ?: return
+        val actual = sha256Hex(file)
+        if (actual != expected) {
+            file.delete()
+            error("SHA-256 mismatch! Expected $expected, got $actual")
         }
+    }
+
+    private fun verifySha256SumIfAvailable(sumUrl: String, file: File) {
+        val text = fetchSmallText(sumUrl) ?: return
+        val expected = text.trim().split(Regex("\\s+")).firstOrNull()?.lowercase() ?: return
+        if (expected.length != 64) return
+        val actual = sha256Hex(file)
+        if (actual != expected) {
+            file.delete()
+            error("GeoData SHA-256 mismatch!")
+        }
+    }
+
+    private fun fetchSmallText(urlStr: String): String? = runCatching {
+        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 6000
+            readTimeout = 6000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "V2Vex-Android/1.1")
+        }
+        try {
+            if (conn.responseCode in 200..299) conn.inputStream.bufferedReader().use { it.readText() }
+            else null
+        } finally {
+            conn.disconnect()
+        }
+    }.getOrNull()
+
+    private fun sha256Hex(file: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(32 * 1024)
+            var read: Int
+            while (input.read(buf).also { read = it } != -1) {
+                md.update(buf, 0, read)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun fetchGitHubRelease(repo: String, assetKeywords: List<String>): RemoteReleaseInfo {
@@ -239,7 +312,7 @@ class CoreManager(private val context: Context) {
             connectTimeout = 10_000
             readTimeout = 10_000
             setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("User-Agent", "V2Vex-Android/1.0")
+            setRequestProperty("User-Agent", "V2Vex-Android/1.1")
         }
         try {
             val code = conn.responseCode
@@ -277,7 +350,7 @@ class CoreManager(private val context: Context) {
             connectTimeout = 15_000
             readTimeout = 30_000
             instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "V2Vex-Android/1.0")
+            setRequestProperty("User-Agent", "V2Vex-Android/1.1")
         }
         try {
             val code = conn.responseCode

@@ -1,13 +1,15 @@
 package com.v2vex.client.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material.icons.rounded.Dns
-import androidx.compose.material.icons.rounded.Speed
-import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.automirrored.rounded.List
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -21,23 +23,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.v2vex.client.V2VexApp
-import com.v2vex.client.core.LatencyTester
-import com.v2vex.client.core.SubscriptionManager
-import com.v2vex.client.core.UriParser
-import com.v2vex.client.model.CoreInfo
-import com.v2vex.client.model.RoutingPreset
-import com.v2vex.client.model.SpeedTestProgress
-import com.v2vex.client.model.Subscription
 import com.v2vex.client.model.VpnConnectionState
-import com.v2vex.client.service.VpnStateHolder
 import com.v2vex.client.ui.screens.DashboardScreen
 import com.v2vex.client.ui.screens.LogsScreen
 import com.v2vex.client.ui.screens.NodesScreen
@@ -45,14 +40,12 @@ import com.v2vex.client.ui.screens.SettingsScreen
 import com.v2vex.client.ui.screens.SpeedLabScreen
 import com.v2vex.client.ui.theme.V2VexTheme
 import com.v2vex.client.ui.theme.XrayCyan
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 
 enum class RootTab(val label: String, val icon: ImageVector) {
-    DASHBOARD("Dashboard", Icons.Rounded.Bolt),
-    NODES("Nodes", Icons.Rounded.Dns),
-    SPEEDLAB("SpeedLab", Icons.Rounded.Speed),
-    SETTINGS("Core", Icons.Rounded.Tune)
+    DASHBOARD("Dashboard", Icons.Rounded.Home),
+    NODES("Nodes", Icons.AutoMirrored.Rounded.List),
+    SPEEDLAB("SpeedLab", Icons.Rounded.PlayArrow),
+    SETTINGS("Core", Icons.Rounded.Settings)
 }
 
 @Composable
@@ -60,42 +53,40 @@ fun V2VexRoot(
     app: V2VexApp,
     coreRefreshNonce: Int,
     onRequestToggleVpn: () -> Unit,
-    onRequestImportLocalCore: () -> Unit
+    onRequestImportLocalCore: () -> Unit,
+    vm: V2VexViewModel = viewModel()
 ) {
-    val profiles by app.repository.profiles.collectAsState()
-    val subscriptions by app.repository.subscriptions.collectAsState()
-    val settings by app.repository.settings.collectAsState()
-    val selectedProfileId by app.repository.selectedProfileId.collectAsState()
-    val speedHistory by app.repository.speedHistory.collectAsState()
-    val vpnSnapshot by VpnStateHolder.snapshot.collectAsState()
+    val context = LocalContext.current
+    val profiles by vm.profiles.collectAsState()
+    val subscriptions by vm.subscriptions.collectAsState()
+    val settings by vm.settings.collectAsState()
+    val selectedProfileId by vm.selectedProfileId.collectAsState()
+    val speedHistory by vm.speedHistory.collectAsState()
+    val vpnSnapshot by vm.vpnSnapshot.collectAsState()
+    val coreInfo by vm.coreInfo.collectAsState()
+    val coreUpdateBusy by vm.coreUpdateBusy.collectAsState()
+    val coreUpdateProgress by vm.coreUpdateProgress.collectAsState()
+    val coreUpdateStatus by vm.coreUpdateStatus.collectAsState()
+    val appUpdateRelease by vm.appUpdateRelease.collectAsState()
+    val isTestingBatch by vm.isTestingBatch.collectAsState()
+    val speedProgress by vm.speedProgress.collectAsState()
 
     val selectedProfile = remember(profiles, selectedProfileId) {
         profiles.firstOrNull { it.id == selectedProfileId } ?: profiles.firstOrNull()
     }
 
-    val scope = rememberCoroutineScope()
     val snackbarHost = remember { SnackbarHostState() }
-
-    var currentTab by remember { mutableStateOf(RootTab.DASHBOARD) }
-    var showLogs by remember { mutableStateOf(false) }
-    var isTestingBatch by remember { mutableStateOf(false) }
-
-    // Core manager state
-    var coreInfo by remember { mutableStateOf(CoreInfo()) }
-    var coreUpdateBusy by remember { mutableStateOf(false) }
-    var coreUpdateProgress by remember { mutableFloatStateOf(0f) }
-    var coreUpdateStatus by remember { mutableStateOf("") }
-
-    // SpeedLab state
-    var speedProgress by remember { mutableStateOf(SpeedTestProgress()) }
-    var speedJob by remember { mutableStateOf<Job?>(null) }
-
-    fun toast(msg: String) {
-        scope.launch { snackbarHost.showSnackbar(msg) }
-    }
+    var currentTab by rememberSaveable { mutableStateOf(RootTab.DASHBOARD) }
+    var showLogs by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(coreRefreshNonce) {
-        coreInfo = app.coreManager.inspectInstalledCore()
+        vm.refreshCoreInfo()
+    }
+
+    LaunchedEffect(Unit) {
+        vm.messages.collect { msg ->
+            snackbarHost.showSnackbar(msg)
+        }
     }
 
     V2VexTheme(themeMode = settings.themeMode) {
@@ -131,7 +122,7 @@ fun V2VexRoot(
                 if (showLogs) {
                     LogsScreen(
                         onBack = { showLogs = false },
-                        onCopied = { toast("Logs copied to clipboard") }
+                        onCopied = { vm.emitMessage("Logs copied to clipboard") }
                     )
                 } else {
                     when (currentTab) {
@@ -144,30 +135,10 @@ fun V2VexRoot(
                             onOpenNodes = { currentTab = RootTab.NODES },
                             onOpenSpeedLab = { currentTab = RootTab.SPEEDLAB },
                             onOpenCoreSettings = { currentTab = RootTab.SETTINGS },
-                            onPingSelected = {
-                                val target = selectedProfile ?: return@DashboardScreen
-                                scope.launch {
-                                    val ms = LatencyTester.testSingle(target)
-                                    app.repository.updateLatencies(mapOf(target.id to ms))
-                                    toast(if (ms > 0) "${target.name}: ${ms}ms" else "${target.name}: Unreachable")
-                                }
-                            },
-                            onToggleFragment = {
-                                app.repository.updateSettings {
-                                    it.copy(fragment = it.fragment.copy(enabled = !it.fragment.enabled))
-                                }
-                            },
-                            onToggleMux = {
-                                app.repository.updateSettings {
-                                    it.copy(mux = it.mux.copy(enabled = !it.mux.enabled))
-                                }
-                            },
-                            onCycleRouting = {
-                                val presets = RoutingPreset.entries
-                                val next = presets[(presets.indexOf(settings.routingPreset) + 1) % presets.size]
-                                app.repository.updateSettings { it.copy(routingPreset = next) }
-                                toast("Routing: ${next.label}")
-                            }
+                            onPingSelected = { vm.pingSelected() },
+                            onToggleFragment = { vm.toggleFragment() },
+                            onToggleMux = { vm.toggleMux() },
+                            onCycleRouting = { vm.cycleRouting() }
                         )
 
                         RootTab.NODES -> NodesScreen(
@@ -176,78 +147,16 @@ fun V2VexRoot(
                             selectedProfileId = selectedProfile?.id,
                             settings = settings,
                             isTestingBatch = isTestingBatch,
-                            onSelectProfile = { app.repository.selectProfile(it) },
-                            onUpsertProfile = { app.repository.upsertProfile(it) },
-                            onDeleteProfile = { app.repository.deleteProfile(it) },
-                            onImportRaw = { raw ->
-                                val parsed = UriParser.parseBatch(raw)
-                                app.repository.addProfiles(parsed)
-                                parsed.size
-                            },
-                            onPingAll = {
-                                if (profiles.isEmpty()) return@NodesScreen
-                                scope.launch {
-                                    isTestingBatch = true
-                                    val results = LatencyTester.testBatch(profiles) { id, ms ->
-                                        app.repository.updateLatencies(mapOf(id to ms))
-                                    }
-                                    isTestingBatch = false
-                                    val reachable = results.values.count { it > 0 }
-                                    toast("RTT test complete: $reachable/${profiles.size} reachable")
-                                }
-                            },
-                            onSelectFastest = {
-                                scope.launch {
-                                    isTestingBatch = true
-                                    val results = LatencyTester.testBatch(profiles) { id, ms ->
-                                        app.repository.updateLatencies(mapOf(id to ms))
-                                    }
-                                    isTestingBatch = false
-                                    val best = results.entries
-                                        .filter { it.value > 0 }
-                                        .minByOrNull { it.value }
-                                    if (best != null) {
-                                        app.repository.selectProfile(best.key)
-                                        val name = profiles.firstOrNull { it.id == best.key }?.name ?: "Node"
-                                        toast("Auto-selected fastest: $name (${best.value}ms)")
-                                    } else {
-                                        toast("No reachable nodes found")
-                                    }
-                                }
-                            },
-                            onAddSubscription = { name, url ->
-                                val sub = Subscription(name = name, url = url)
-                                app.repository.upsertSubscription(sub)
-                                scope.launch {
-                                    toast("Syncing subscription '$name'...")
-                                    SubscriptionManager.fetchSubscription(sub).fold(
-                                        onSuccess = { res ->
-                                            app.repository.upsertSubscription(res.updatedSubscription)
-                                            app.repository.replaceSubscriptionProfiles(sub.id, res.profiles)
-                                            toast("Synced '${sub.name}': ${res.profiles.size} node(s)")
-                                        },
-                                        onFailure = { toast("Sync failed: ${it.message}") }
-                                    )
-                                }
-                            },
-                            onRefreshSubscription = { sub ->
-                                scope.launch {
-                                    toast("Refreshing '${sub.name}'...")
-                                    SubscriptionManager.fetchSubscription(sub).fold(
-                                        onSuccess = { res ->
-                                            app.repository.upsertSubscription(res.updatedSubscription)
-                                            app.repository.replaceSubscriptionProfiles(sub.id, res.profiles)
-                                            toast("Updated '${sub.name}': ${res.profiles.size} node(s)")
-                                        },
-                                        onFailure = { toast("Refresh failed: ${it.message}") }
-                                    )
-                                }
-                            },
-                            onDeleteSubscription = { subId ->
-                                app.repository.deleteSubscription(subId, removeNodes = true)
-                                toast("Subscription removed")
-                            },
-                            onShowMessage = { toast(it) }
+                            onSelectProfile = { vm.selectProfile(it) },
+                            onUpsertProfile = { vm.upsertProfile(it) },
+                            onDeleteProfile = { vm.deleteProfile(it) },
+                            onImportRaw = { vm.importRaw(it) },
+                            onPingAll = { vm.pingAll() },
+                            onSelectFastest = { vm.selectFastest() },
+                            onAddSubscription = { n, u -> vm.addSubscription(n, u) },
+                            onRefreshSubscription = { vm.refreshSubscription(it) },
+                            onDeleteSubscription = { vm.deleteSubscription(it) },
+                            onShowMessage = { vm.emitMessage(it) }
                         )
 
                         RootTab.SPEEDLAB -> SpeedLabScreen(
@@ -256,99 +165,35 @@ fun V2VexRoot(
                             settings = settings.speedTest,
                             isVpnConnected = vpnSnapshot.state == VpnConnectionState.CONNECTED,
                             activeNodeName = selectedProfile?.name,
-                            onStartTest = {
-                                speedJob?.cancel()
-                                speedJob = scope.launch {
-                                    val useProxy = vpnSnapshot.state == VpnConnectionState.CONNECTED && coreInfo.executable
-                                    runCatching {
-                                        val record = app.speedTestEngine.runBenchmark(
-                                            settings = settings.speedTest,
-                                            useProxy = useProxy,
-                                            httpProxyPort = settings.httpPort,
-                                            profileId = selectedProfile?.id,
-                                            profileName = selectedProfile?.name ?: "Direct Network",
-                                            onProgress = { speedProgress = it }
-                                        )
-                                        app.repository.addSpeedRecord(record)
-                                    }
-                                }
-                            },
-                            onStopTest = {
-                                speedJob?.cancel()
-                                speedJob = null
-                                speedProgress = SpeedTestProgress(statusDetail = "Benchmark cancelled")
-                            },
+                            onStartTest = { vm.startSpeedTest() },
+                            onStopTest = { vm.stopSpeedTest() },
                             onUpdateSpeedSettings = { next ->
-                                app.repository.updateSettings { it.copy(speedTest = next) }
+                                vm.updateSettings(hotReloadVpn = false) { it.copy(speedTest = next) }
                             },
-                            onClearHistory = {
-                                app.repository.clearSpeedHistory()
-                                toast("SpeedLab history cleared")
-                            }
+                            onClearHistory = { vm.clearSpeedHistory() }
                         )
 
                         RootTab.SETTINGS -> SettingsScreen(
                             settings = settings,
+                            profiles = profiles,
                             coreInfo = coreInfo,
                             coreUpdateBusy = coreUpdateBusy,
                             coreUpdateProgress = coreUpdateProgress,
                             coreUpdateStatus = coreUpdateStatus,
-                            onUpdateSettings = { app.repository.updateSettings(it) },
-                            onCheckAndUpdateCore = {
-                                scope.launch {
-                                    coreUpdateBusy = true
-                                    coreUpdateProgress = 0.05f
-                                    coreUpdateStatus = "Checking ${settings.customCoreRepo}..."
-                                    app.coreManager.checkLatestXrayRelease(settings.customCoreRepo).fold(
-                                        onSuccess = { release ->
-                                            app.coreManager.downloadAndInstallXrayCore(release) { frac, msg ->
-                                                coreUpdateProgress = frac
-                                                coreUpdateStatus = msg
-                                            }.fold(
-                                                onSuccess = { info ->
-                                                    coreInfo = info
-                                                    toast("Xray-core updated to ${release.tagName}")
-                                                },
-                                                onFailure = { err ->
-                                                    coreUpdateStatus = "Update failed: ${err.message}"
-                                                    toast("Core update failed: ${err.message}")
-                                                }
-                                            )
-                                        },
-                                        onFailure = { err ->
-                                            coreUpdateStatus = "Check failed: ${err.message}"
-                                            toast("GitHub check failed: ${err.message}")
-                                        }
-                                    )
-                                    coreUpdateBusy = false
-                                }
-                            },
-                            onUpdateGeoData = {
-                                scope.launch {
-                                    coreUpdateBusy = true
-                                    coreUpdateProgress = 0.05f
-                                    coreUpdateStatus = "Updating GeoIP & GeoSite..."
-                                    app.coreManager.updateGeoData(settings.customGeoRepo) { frac, msg ->
-                                        coreUpdateProgress = frac
-                                        coreUpdateStatus = msg
-                                    }.fold(
-                                        onSuccess = { info ->
-                                            coreInfo = info
-                                            toast("GeoIP & GeoSite updated")
-                                        },
-                                        onFailure = { err ->
-                                            coreUpdateStatus = "Geo update failed: ${err.message}"
-                                            toast("Geo update failed: ${err.message}")
-                                        }
-                                    )
-                                    coreUpdateBusy = false
-                                }
-                            },
+                            appUpdateRelease = appUpdateRelease,
+                            onUpdateSettings = { vm.updateSettings(hotReloadVpn = true, transform = it) },
+                            onCheckAndUpdateCore = { vm.checkAndUpdateCore() },
+                            onUpdateGeoData = { vm.updateGeoData() },
                             onImportLocalCore = onRequestImportLocalCore,
-                            onExportBackup = { app.repository.exportFullBackup() },
-                            onImportBackup = { app.repository.importFullBackup(it) },
+                            onOpenAppReleaseUrl = { url ->
+                                runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                }
+                            },
+                            onExportBackup = { vm.exportFullBackup() },
+                            onImportBackup = { vm.importFullBackup(it) },
                             onOpenLogs = { showLogs = true },
-                            onShowMessage = { toast(it) }
+                            onShowMessage = { vm.emitMessage(it) }
                         )
                     }
                 }

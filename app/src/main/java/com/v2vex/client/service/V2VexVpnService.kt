@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.ProxyInfo
-import android.net.TrafficStats
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -23,6 +22,7 @@ import com.v2vex.client.core.XrayProcessManager
 import com.v2vex.client.model.AppSettings
 import com.v2vex.client.model.ServerProfile
 import com.v2vex.client.model.SplitTunnelMode
+import hev.htproxy.TProxyService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,12 +31,21 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 
+/**
+ * Full L3 Android VpnService powered by:
+ * - Xray-core (libxray.so) for VLESS/REALITY/XHTTP/VMess/Trojan/SS/WG
+ * - Native C hev-socks5-tunnel (TProxyService) for full TCP + UDP + DNS TUN routing
+ * - Exact TUN-level RX/TX telemetry via TProxyGetStats() (zero double-counting!)
+ * - Seamless ACTION_RELOAD hot-reload when toggling Fragment/Mux/Routing or switching nodes
+ */
 class V2VexVpnService : VpnService() {
 
     companion object {
         const val ACTION_START = "com.v2vex.client.START_VPN"
         const val ACTION_STOP = "com.v2vex.client.STOP_VPN"
+        const val ACTION_RELOAD = "com.v2vex.client.RELOAD_VPN"
         private const val CHANNEL_ID = "v2vex_vpn_channel"
         private const val NOTIF_ID = 9901
 
@@ -45,6 +54,13 @@ class V2VexVpnService : VpnService() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
+                context.startService(intent)
+            }
+        }
+
+        fun reloadIfRunning(context: Context) {
+            if (VpnStateHolder.snapshot.value.state == com.v2vex.client.model.VpnConnectionState.CONNECTED) {
+                val intent = Intent(context, V2VexVpnService::class.java).setAction(ACTION_RELOAD)
                 context.startService(intent)
             }
         }
@@ -59,6 +75,7 @@ class V2VexVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var xrayProcess: XrayProcessManager? = null
     private var telemetryJob: Job? = null
+    private var tproxyActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -73,6 +90,10 @@ class V2VexVpnService : VpnService() {
                 stopTunnel()
                 return START_NOT_STICKY
             }
+            ACTION_RELOAD -> {
+                reloadCoreOnly()
+                return START_STICKY
+            }
             ACTION_START, null -> {
                 startTunnel()
                 return START_STICKY
@@ -83,6 +104,7 @@ class V2VexVpnService : VpnService() {
 
     private fun startTunnel() {
         val app = application as V2VexApp
+        app.repository.ensureLoaded()
         val profile = app.repository.getSelectedProfile()
         if (profile == null) {
             LogBuffer.e("VPN", "Cannot start VPN: no server profile selected")
@@ -93,30 +115,51 @@ class V2VexVpnService : VpnService() {
         val settings = app.repository.settings.value
 
         VpnStateHolder.setConnecting(profile.id, profile.name, profile.shortBadge())
-        startForeground(NOTIF_ID, buildNotification(profile.name, "Connecting...", settings))
+        startForeground(NOTIF_ID, buildNotification(profile.name, "Starting Xray + L3 TUN..."))
 
         serviceScope.launch(Dispatchers.IO) {
             try {
-                // 1. Generate Xray JSON configuration
-                val configJson = XrayConfigGenerator.generate(profile, settings)
-                LogBuffer.i("VPN", "Generated Xray config (${configJson.length} bytes) for '${profile.name}'")
+                app.coreManager.ensureBundledGeoAssets()
+                val chainProfile = app.repository.getProfileById(settings.chainProfileId)
+                val configJson = XrayConfigGenerator.generate(
+                    profile = profile,
+                    settings = settings,
+                    hasGeoIp = app.coreManager.hasGeoIp(),
+                    hasGeoSite = app.coreManager.hasGeoSite(),
+                    chainProfile = chainProfile
+                )
+                LogBuffer.i("VPN", "Generated Xray config (${configJson.length}B) for '${profile.name}'")
 
-                // 2. Start Xray-core process (if binary installed/bundled)
-                val (_, coreStatus) = xrayProcess?.start(configJson, serviceScope)
-                    ?: (false to "Unavailable")
+                // 1. Launch & verify Xray-core is genuinely alive
+                val (coreStarted, coreStatus) = xrayProcess?.start(configJson, serviceScope) { exitCode ->
+                    stopTunnel("Xray-core crashed (exit $exitCode)")
+                } ?: (false to "Core manager unavailable")
 
-                // 3. Establish Android TUN interface
-                establishTunInterface(profile, settings)
+                if (!coreStarted) {
+                    stopTunnel(coreStatus)
+                    return@launch
+                }
+
+                // 2. Establish Android TUN interface
+                val pfd = establishTunInterface(profile, settings)
+
+                // 3. Start native C hev-socks5-tunnel (full TCP + UDP + DNS L3 routing!)
+                val tproxyCfg = writeTProxyConfig(settings)
+                val startedTun = TProxyService.TProxyStartService(tproxyCfg.absolutePath, pfd.fd)
+                if (!startedTun) {
+                    stopTunnel("Failed to start L3 hev-socks5-tunnel engine")
+                    return@launch
+                }
+                tproxyActive = true
+                LogBuffer.i("TUN", "hev-socks5-tunnel ACTIVE (fd=${pfd.fd}, MTU=${settings.vpnMtu}, SOCKS=127.0.0.1:${settings.socksPort})")
 
                 VpnStateHolder.setConnected(
                     profileId = profile.id,
                     profileName = profile.name,
                     badge = profile.shortBadge(),
-                    coreMode = coreStatus
+                    coreMode = "$coreStatus · L3 TUN"
                 )
-                LogBuffer.i("VPN", "Tunnel ACTIVE · ${profile.name} · $coreStatus")
-
-                startTelemetryLoop(profile, settings)
+                startTelemetryLoop(profile)
             } catch (t: Throwable) {
                 LogBuffer.e("VPN", "Tunnel start failed: ${t.message}")
                 stopTunnel(error = t.message ?: "Failed to start VPN")
@@ -124,8 +167,69 @@ class V2VexVpnService : VpnService() {
         }
     }
 
-    private fun establishTunInterface(profile: ServerProfile, settings: AppSettings) {
+    /**
+     * Hot-reloads Xray-core config cleanly without dropping the Android TUN interface!
+     */
+    private fun reloadCoreOnly() {
+        val app = application as V2VexApp
+        val profile = app.repository.getSelectedProfile() ?: return
+        val settings = app.repository.settings.value
+
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val chainProfile = app.repository.getProfileById(settings.chainProfileId)
+                val configJson = XrayConfigGenerator.generate(
+                    profile = profile,
+                    settings = settings,
+                    hasGeoIp = app.coreManager.hasGeoIp(),
+                    hasGeoSite = app.coreManager.hasGeoSite(),
+                    chainProfile = chainProfile
+                )
+                val (ok, coreStatus) = xrayProcess?.start(configJson, serviceScope) { exitCode ->
+                    stopTunnel("Xray-core crashed (exit $exitCode)")
+                } ?: (false to "Core error")
+
+                if (ok) {
+                    VpnStateHolder.setConnected(
+                        profileId = profile.id,
+                        profileName = profile.name,
+                        badge = profile.shortBadge(),
+                        coreMode = "$coreStatus · L3 TUN"
+                    )
+                    LogBuffer.i("VPN", "Hot-reloaded Xray-core for '${profile.name}'")
+                } else {
+                    stopTunnel(coreStatus)
+                }
+            } catch (t: Throwable) {
+                LogBuffer.e("VPN", "Hot-reload failed: ${t.message}")
+            }
+        }
+    }
+
+    private fun writeTProxyConfig(settings: AppSettings): File {
+        val mtu = settings.vpnMtu.coerceIn(1280, 9000)
+        val ipv6Line = if (settings.enableIpv6) "  ipv6: 'fd99:2026::1'\n" else ""
+        val yaml = """
+            tunnel:
+              mtu: $mtu
+              ipv4: 10.99.0.1
+            ${ipv6Line}socks5:
+              port: ${settings.socksPort}
+              address: 127.0.0.1
+              udp: 'udp'
+            misc:
+              task-stack-size: 81920
+              connect-timeout: 5000
+              read-write-timeout: 60000
+              log-level: warn
+        """.trimIndent()
+        return File(filesDir, "tproxy.yml").apply { writeText(yaml) }
+    }
+
+    private fun establishTunInterface(profile: ServerProfile, settings: AppSettings): ParcelFileDescriptor {
+        stopTProxy()
         vpnInterface?.close()
+
         val builder = Builder()
             .setSession("V2Vex · ${profile.name}")
             .setMtu(settings.vpnMtu.coerceIn(1280, 9000))
@@ -135,12 +239,11 @@ class V2VexVpnService : VpnService() {
 
         if (settings.enableIpv6) {
             runCatching {
-                builder.addAddress("fd99:xray::1", 126)
+                builder.addAddress("fd99:2026::1", 126)
                 builder.addRoute("::", 0)
             }
         }
 
-        // Attach local HTTP proxy on Android 10+ so HTTP/HTTPS apps seamlessly traverse Xray inbound
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
                 builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", settings.httpPort))
@@ -170,59 +273,73 @@ class V2VexVpnService : VpnService() {
             }
         }
 
-        vpnInterface = builder.establish()
+        val pfd = builder.establish()
             ?: error("VPN permission revoked or TUN interface could not be established")
+        vpnInterface = pfd
+        return pfd
     }
 
-    private fun startTelemetryLoop(profile: ServerProfile, settings: AppSettings) {
+    /**
+     * Exact TUN-level telemetry directly from hev-socks5-tunnel TProxyGetStats() — ZERO double-counting!
+     * TProxyGetStats() returns [tx_packets, tx_bytes, rx_packets, rx_bytes].
+     */
+    private fun startTelemetryLoop(profile: ServerProfile) {
         telemetryJob?.cancel()
         telemetryJob = serviceScope.launch(Dispatchers.Default) {
-            val baseRx = TrafficStats.getTotalRxBytes().coerceAtLeast(0L)
-            val baseTx = TrafficStats.getTotalTxBytes().coerceAtLeast(0L)
-            var prevRx = baseRx
-            var prevTx = baseTx
+            var prevTxBytes = 0L
+            var prevRxBytes = 0L
             var prevNs = SystemClock.elapsedRealtimeNanos()
             var notifCounter = 0
 
             while (isActive) {
                 delay(500)
                 val nowNs = SystemClock.elapsedRealtimeNanos()
-                val curRx = TrafficStats.getTotalRxBytes().coerceAtLeast(prevRx)
-                val curTx = TrafficStats.getTotalTxBytes().coerceAtLeast(prevTx)
                 val deltaNs = (nowNs - prevNs).coerceAtLeast(1L)
 
-                val rxDelta = (curRx - prevRx).coerceAtLeast(0L)
-                val txDelta = (curTx - prevTx).coerceAtLeast(0L)
+                val stats = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
+                val curTx = stats?.getOrNull(1)?.coerceAtLeast(0L) ?: prevTxBytes
+                val curRx = stats?.getOrNull(3)?.coerceAtLeast(0L) ?: prevRxBytes
+
+                val txDelta = (curTx - prevTxBytes).coerceAtLeast(0L)
+                val rxDelta = (curRx - prevRxBytes).coerceAtLeast(0L)
 
                 val dlBps = ((rxDelta * 8.0) / (deltaNs / 1_000_000_000.0)).toLong()
                 val ulBps = ((txDelta * 8.0) / (deltaNs / 1_000_000_000.0)).toLong()
 
-                prevRx = curRx
-                prevTx = curTx
+                prevTxBytes = curTx
+                prevRxBytes = curRx
                 prevNs = nowNs
 
                 VpnStateHolder.updateTelemetry(
                     downloadBps = dlBps,
                     uploadBps = ulBps,
-                    totalDownloadBytes = (curRx - baseRx).coerceAtLeast(0L),
-                    totalUploadBytes = (curTx - baseTx).coerceAtLeast(0L)
+                    totalDownloadBytes = curRx,
+                    totalUploadBytes = curTx
                 )
 
-                // Update notification every 2 seconds to keep CPU & battery impact near zero
                 notifCounter++
                 if (notifCounter % 4 == 0) {
                     val unit = (application as V2VexApp).repository.settings.value.speedUnit
                     val subtitle = "↓ ${SpeedMath.formatSpeed(dlBps, unit)}   ↑ ${SpeedMath.formatSpeed(ulBps, unit)}"
-                    val nm = getSystemService(NotificationManager::class.java)
-                    nm?.notify(NOTIF_ID, buildNotification(profile.name, subtitle, settings))
+                    val activeName = VpnStateHolder.snapshot.value.activeProfileName ?: profile.name
+                    getSystemService(NotificationManager::class.java)
+                        ?.notify(NOTIF_ID, buildNotification(activeName, subtitle))
                 }
             }
+        }
+    }
+
+    private fun stopTProxy() {
+        if (tproxyActive) {
+            runCatching { TProxyService.TProxyStopService() }
+            tproxyActive = false
         }
     }
 
     private fun stopTunnel(error: String? = null) {
         telemetryJob?.cancel()
         telemetryJob = null
+        stopTProxy()
         xrayProcess?.stop()
         runCatching { vpnInterface?.close() }
         vpnInterface = null
@@ -239,6 +356,7 @@ class V2VexVpnService : VpnService() {
 
     override fun onDestroy() {
         telemetryJob?.cancel()
+        stopTProxy()
         xrayProcess?.stop()
         runCatching { vpnInterface?.close() }
         serviceScope.cancel()
@@ -259,7 +377,7 @@ class V2VexVpnService : VpnService() {
         }
     }
 
-    private fun buildNotification(title: String, text: String, settings: AppSettings): Notification {
+    private fun buildNotification(title: String, text: String): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
             0,

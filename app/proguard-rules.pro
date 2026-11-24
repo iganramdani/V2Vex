@@ -2,6 +2,9 @@
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.AnnotationsKt
 
+# Keep native JNI bridge for hev-socks5-tunnel
+-keep class hev.htproxy.TProxyService { *; }
+
 # Keep kotlinx.serialization generated serializers
 -keepclassmembers class kotlinx.serialization.json.** {
     *** Companion;

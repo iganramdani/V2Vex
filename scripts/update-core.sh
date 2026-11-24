@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# V2Vex — 1-Command Bundled Xray-core & GeoData Updater
-# Downloads the latest official XTLS/Xray-core Android binaries into app/src/main/jniLibs/<abi>/libxray.so
-# so Android 10–15 devices can execute Xray-core directly from nativeLibraryDir (W^X compliant).
+# V2Vex — 1-Command Bundled Xray-core, hev-socks5-tunnel & GeoData Updater
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JNI_DIR="$ROOT_DIR/app/src/main/jniLibs"
 ASSETS_DIR="$ROOT_DIR/app/src/main/assets"
+LIBS_DIR="$ROOT_DIR/app/libs"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -43,6 +42,13 @@ fetch_abi() {
 fetch_abi "Xray-android-arm64-v8a.zip" "arm64-v8a"
 fetch_abi "Xray-android-arm32-v7a.zip" "armeabi-v7a"
 
+echo "==> Fetching latest hev-socks5-tunnel.aar ..."
+HEV_JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/heiher/hev-socks5-tunnel/releases/latest")"
+HEV_TAG="$(echo "$HEV_JSON" | jq -r '.tag_name')"
+HEV_URL="$(echo "$HEV_JSON" | jq -r '.assets[] | select(.name == "hev-socks5-tunnel.aar") | .browser_download_url')"
+mkdir -p "$LIBS_DIR"
+curl -fL --progress-bar "$HEV_URL" -o "$LIBS_DIR/hev-socks5-tunnel.aar"
+echo "==> Bundled hev-socks5-tunnel $HEV_TAG -> $LIBS_DIR/hev-socks5-tunnel.aar"
+
 echo "$TAG" > "$ASSETS_DIR/core_version.txt"
-echo "==> Done! Bundled Xray-core $TAG into $JNI_DIR and GeoData into $ASSETS_DIR."
-echo "==> Rebuild APK with: gradle assembleRelease"
+echo "==> Done! Xray-core $TAG + hev-socks5-tunnel $HEV_TAG ready."

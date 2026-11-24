@@ -22,8 +22,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -173,7 +173,7 @@ fun ConnectionOrb(
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
-                    imageVector = if (state == VpnConnectionState.CONNECTED) Icons.Rounded.Bolt else Icons.Rounded.PowerSettingsNew,
+                    imageVector = if (state == VpnConnectionState.CONNECTED) Icons.Rounded.Lock else Icons.Rounded.PlayArrow,
                     contentDescription = "Toggle VPN",
                     tint = accentColor,
                     modifier = Modifier.size(44.dp)

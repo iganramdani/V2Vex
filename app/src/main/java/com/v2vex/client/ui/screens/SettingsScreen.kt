@@ -20,14 +20,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.List
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Apps
-import androidx.compose.material.icons.rounded.Backup
-import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.Public
-import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -60,9 +59,11 @@ import com.v2vex.client.core.SpeedMath
 import com.v2vex.client.model.AppSettings
 import com.v2vex.client.model.CoreInfo
 import com.v2vex.client.model.CustomRoutingRule
+import com.v2vex.client.model.RemoteReleaseInfo
 import com.v2vex.client.model.RoutingPreset
 import com.v2vex.client.model.RuleMatchType
 import com.v2vex.client.model.RuleTarget
+import com.v2vex.client.model.ServerProfile
 import com.v2vex.client.model.SpeedUnit
 import com.v2vex.client.model.SplitTunnelMode
 import com.v2vex.client.model.ThemeMode
@@ -74,14 +75,17 @@ import com.v2vex.client.ui.theme.XrayEmerald
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
+    profiles: List<ServerProfile>,
     coreInfo: CoreInfo,
     coreUpdateBusy: Boolean,
     coreUpdateProgress: Float,
     coreUpdateStatus: String,
+    appUpdateRelease: RemoteReleaseInfo?,
     onUpdateSettings: ((AppSettings) -> AppSettings) -> Unit,
     onCheckAndUpdateCore: () -> Unit,
     onUpdateGeoData: () -> Unit,
     onImportLocalCore: () -> Unit,
+    onOpenAppReleaseUrl: (String) -> Unit,
     onExportBackup: () -> String,
     onImportBackup: (String) -> Result<Int>,
     onOpenLogs: () -> Unit,
@@ -226,16 +230,16 @@ fun SettingsScreen(
                     onClick = onCheckAndUpdateCore,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Update Core")
+                    Text("Check Core")
                 }
                 OutlinedButton(
                     enabled = !coreUpdateBusy,
                     onClick = onUpdateGeoData,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Public, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Build, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Update Geo")
                 }
@@ -245,9 +249,17 @@ fun SettingsScreen(
                 onClick = onImportLocalCore,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Import Custom Xray .zip / Binary")
+            }
+            appUpdateRelease?.let { rel ->
+                Button(
+                    onClick = { onOpenAppReleaseUrl(rel.downloadUrl) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Download V2Vex ${rel.tagName} APK (Bundled Core)")
+                }
             }
         }
 
@@ -371,6 +383,26 @@ fun SettingsScreen(
                 checked = settings.sniffing.enabled,
                 onCheckedChange = { on -> onUpdateSettings { it.copy(sniffing = it.sniffing.copy(enabled = on)) } }
             )
+
+            HorizontalDivider()
+            Text("Multi-Hop Proxy Chain (Dialer Proxy)", style = MaterialTheme.typography.labelMedium)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FilterChip(
+                    selected = settings.chainProfileId == null,
+                    onClick = { onUpdateSettings { it.copy(chainProfileId = null) } },
+                    label = { Text("Disabled (Direct)") }
+                )
+                profiles.take(8).forEach { hop ->
+                    FilterChip(
+                        selected = settings.chainProfileId == hop.id,
+                        onClick = { onUpdateSettings { it.copy(chainProfileId = hop.id) } },
+                        label = { Text(hop.name.take(18)) }
+                    )
+                }
+            }
         }
 
         // 4. DNS ENGINE
@@ -391,7 +423,7 @@ fun SettingsScreen(
             )
             SettingToggleRow(
                 title = "Enable FakeDNS",
-                subtitle = "Zero-RTT synthetic IP mapping for instant domain resolution",
+                subtitle = "Zero-RTT synthetic IP pool (198.18.0.0/15) for instant resolution",
                 checked = settings.dns.enableFakeDns,
                 onCheckedChange = { on -> onUpdateSettings { it.copy(dns = it.dns.copy(enableFakeDns = on)) } }
             )
@@ -416,7 +448,7 @@ fun SettingsScreen(
                     onClick = { showAppPickerDialog = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Rounded.Apps, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.AutoMirrored.Rounded.List, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Select Apps (${settings.splitTunnelPackages.size} selected)")
                 }
@@ -450,7 +482,7 @@ fun SettingsScreen(
             }
             SettingToggleRow(
                 title = "Enable IPv6 Tunneling",
-                subtitle = "Route IPv6 traffic through TUN interface",
+                subtitle = "Route IPv6 traffic through L3 TUN interface",
                 checked = settings.enableIpv6,
                 onCheckedChange = { on -> onUpdateSettings { it.copy(enableIpv6 = on) } }
             )
@@ -497,7 +529,7 @@ fun SettingsScreen(
                     onClick = onOpenLogs,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Info, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Live Logs")
                 }
@@ -509,7 +541,7 @@ fun SettingsScreen(
                     },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Backup, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Copy Backup")
                 }

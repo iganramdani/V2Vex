@@ -15,10 +15,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -165,7 +165,7 @@ fun SpeedLabScreen(
                 )
             }
             IconButton(onClick = { showConfigDialog = true }) {
-                Icon(Icons.Rounded.Tune, contentDescription = "Calibrate SpeedLab", tint = XrayCyan)
+                Icon(Icons.Rounded.Settings, contentDescription = "Calibrate SpeedLab", tint = XrayCyan)
             }
         }
 
@@ -220,7 +220,7 @@ fun SpeedLabScreen(
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Icon(
-                    imageVector = if (isRunning) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                    imageVector = if (isRunning) Icons.Rounded.Close else Icons.Rounded.PlayArrow,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp)
                 )
@@ -247,7 +247,7 @@ fun SpeedLabScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            LabStatCard("Ping", String.format("%.1f ms", progress.pingMs), XrayAmber, Modifier.weight(1f))
+            LabStatCard("True RTT", String.format("%.1f ms", progress.pingMs), XrayAmber, Modifier.weight(1f))
             LabStatCard("Jitter", String.format("%.1f ms", progress.jitterMs), XrayViolet, Modifier.weight(1f))
             LabStatCard("Stability", String.format("%.0f%%", progress.stabilityPercent), XrayEmerald, Modifier.weight(1f))
         }
@@ -266,7 +266,7 @@ fun SpeedLabScreen(
             )
             if (history.isNotEmpty()) {
                 IconButton(onClick = onClearHistory) {
-                    Icon(Icons.Rounded.DeleteSweep, contentDescription = "Clear History", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(Icons.Rounded.Delete, contentDescription = "Clear History", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

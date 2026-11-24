@@ -19,15 +19,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ArrowDownward
-import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.AutoFixHigh
-import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.Dns
-import androidx.compose.material.icons.rounded.Memory
-import androidx.compose.material.icons.rounded.NetworkCheck
-import androidx.compose.material.icons.rounded.Route
-import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.Build
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -204,7 +203,7 @@ fun DashboardScreen(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Rounded.Dns,
+                            imageVector = Icons.Rounded.Star,
                             contentDescription = null,
                             tint = XrayCyan
                         )
@@ -248,13 +247,13 @@ fun DashboardScreen(
                 }
                 IconButton(onClick = onPingSelected) {
                     Icon(
-                        imageVector = Icons.Rounded.NetworkCheck,
-                        contentDescription = "Ping Node",
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = "Test Node Delay",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Icon(
-                    imageVector = Icons.Rounded.ChevronRight,
+                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -272,7 +271,7 @@ fun DashboardScreen(
                 title = "Download",
                 value = SpeedMath.formatSpeed(snapshot.currentDownloadBps, settings.speedUnit),
                 subtitle = "Total: ${SpeedMath.formatBytes(snapshot.totalDownloadBytes)}",
-                icon = Icons.Rounded.ArrowDownward,
+                icon = Icons.Rounded.KeyboardArrowDown,
                 accent = XrayCyan,
                 modifier = Modifier.weight(1f)
             )
@@ -280,7 +279,7 @@ fun DashboardScreen(
                 title = "Upload",
                 value = SpeedMath.formatSpeed(snapshot.currentUploadBps, settings.speedUnit),
                 subtitle = "Total: ${SpeedMath.formatBytes(snapshot.totalUploadBytes)}",
-                icon = Icons.Rounded.ArrowUpward,
+                icon = Icons.Rounded.KeyboardArrowUp,
                 accent = XrayEmerald,
                 modifier = Modifier.weight(1f)
             )
@@ -305,7 +304,7 @@ fun DashboardScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Power-User Quick Controls Grid
+        // Power-User Quick Controls Grid (live hot-reload!)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -320,7 +319,7 @@ fun DashboardScreen(
                 },
                 active = true,
                 accent = XrayCyan,
-                icon = Icons.Rounded.Route,
+                icon = Icons.Rounded.Settings,
                 onClick = onCycleRouting,
                 modifier = Modifier.weight(1f)
             )
@@ -329,7 +328,7 @@ fun DashboardScreen(
                 value = if (settings.fragment.enabled) "ON" else "OFF",
                 active = settings.fragment.enabled,
                 accent = XrayViolet,
-                icon = Icons.Rounded.AutoFixHigh,
+                icon = Icons.Rounded.Build,
                 onClick = onToggleFragment,
                 modifier = Modifier.weight(1f)
             )
@@ -338,7 +337,7 @@ fun DashboardScreen(
                 value = if (settings.mux.enabled) "x${settings.mux.concurrency}" else "OFF",
                 active = settings.mux.enabled,
                 accent = XrayEmerald,
-                icon = Icons.Rounded.Memory,
+                icon = Icons.Rounded.Star,
                 onClick = onToggleMux,
                 modifier = Modifier.weight(1f)
             )
@@ -358,21 +357,21 @@ fun DashboardScreen(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Rounded.Speed, contentDescription = null, tint = XrayCyan)
+                Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = XrayCyan)
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Open SpeedLab Benchmark",
+                        text = "Open SpeedLab v2 Benchmark",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Multi-stream trimmed-mean Mbps + RFC 3550 Jitter",
+                        text = "Keep-Alive True RTT · Server-ACK Upload · Multi-Stream Mbps",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = XrayCyan)
+                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = XrayCyan)
             }
         }
 

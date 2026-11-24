@@ -5,8 +5,14 @@ import com.v2vex.client.core.CoreManager
 import com.v2vex.client.core.LogBuffer
 import com.v2vex.client.core.SpeedTestEngine
 import com.v2vex.client.data.AppRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class V2VexApp : Application() {
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     lateinit var repository: AppRepository
         private set
@@ -20,8 +26,14 @@ class V2VexApp : Application() {
     override fun onCreate() {
         super.onCreate()
         repository = AppRepository(this)
-        coreManager = CoreManager(this).also { it.ensureBundledGeoAssets() }
+        coreManager = CoreManager(this)
         speedTestEngine = SpeedTestEngine()
-        LogBuffer.i("App", "V2Vex initialized (99% Fast & Light)")
+
+        // Zero main-thread disk I/O: warm repository & GeoData asynchronously
+        repository.loadAsync()
+        appScope.launch {
+            coreManager.ensureBundledGeoAssets()
+        }
+        LogBuffer.i("App", "V2Vex v1.1.0 initialized (99% Fast & Light)")
     }
 }
