@@ -27,11 +27,10 @@ import androidx.compose.ui.unit.dp
 import com.v2vex.client.core.SpeedMath
 import com.v2vex.client.model.SpeedUnit
 import com.v2vex.client.model.TrafficSample
-import com.v2vex.client.ui.theme.XrayCyan
-import com.v2vex.client.ui.theme.XrayEmerald
 
 /**
- * Interactive touch-scrubbable dual-series (Download & Upload) live traffic chart.
+ * Two-Tone Minimalist touch-scrubbable throughput chart:
+ * Tone 1 (Primary Chalk/Ink) = Download | Tone 2 (Signal Mint) = Upload.
  */
 @Composable
 fun LiveTrafficChart(
@@ -40,7 +39,9 @@ fun LiveTrafficChart(
     modifier: Modifier = Modifier
 ) {
     var inspectedIndex by remember { mutableStateOf<Int?>(null) }
-    val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    val dlColor = MaterialTheme.colorScheme.primary
+    val ulColor = MaterialTheme.colorScheme.secondary
     val inspected = inspectedIndex?.let { samples.getOrNull(it) }
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -52,16 +53,16 @@ fun LiveTrafficChart(
         ) {
             Text(
                 text = if (inspected != null) {
-                    "Inspected · ↓ ${SpeedMath.formatSpeed(inspected.downloadBps, unit)} · ↑ ${SpeedMath.formatSpeed(inspected.uploadBps, unit)}"
+                    "↓ ${SpeedMath.formatSpeed(inspected.downloadBps, unit)} · ↑ ${SpeedMath.formatSpeed(inspected.uploadBps, unit)}"
                 } else {
-                    "Live Throughput (drag to inspect)"
+                    "THROUGHPUT (DRAG TO INSPECT)"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             val maxMbps = (samples.maxOfOrNull { maxOf(it.downloadMbps, it.uploadMbps) } ?: 1.0).coerceAtLeast(1.0)
             Text(
-                text = "Scale: ${String.format("%.1f", maxMbps)} Mbps",
+                text = "PEAK ${String.format("%.1f", maxMbps)} Mbps",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -70,7 +71,7 @@ fun LiveTrafficChart(
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(110.dp)
+                .height(98.dp)
                 .pointerInput(samples.size) {
                     detectHorizontalDragGestures(
                         onDragEnd = { inspectedIndex = null },
@@ -86,9 +87,8 @@ fun LiveTrafficChart(
             val w = size.width
             val h = size.height
 
-            // Subtle horizontal grid lines
-            for (i in 1..3) {
-                val y = h * (i / 4f)
+            for (i in 1..2) {
+                val y = h * (i / 3f)
                 drawLine(gridColor, Offset(0f, y), Offset(w, y), strokeWidth = 1.dp.toPx())
             }
 
@@ -120,28 +120,27 @@ fun LiveTrafficChart(
                     drawPath(
                         path = fillPath,
                         brush = Brush.verticalGradient(
-                            colors = listOf(color.copy(alpha = 0.28f), Color.Transparent)
+                            colors = listOf(color.copy(alpha = 0.14f), Color.Transparent)
                         )
                     )
                 }
                 drawPath(
                     path = linePath,
                     color = color,
-                    style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round)
+                    style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round)
                 )
             }
 
-            drawSeries(samples.map { it.uploadBps }, XrayEmerald, fillArea = false)
-            drawSeries(samples.map { it.downloadBps }, XrayCyan, fillArea = true)
+            drawSeries(samples.map { it.uploadBps }, ulColor, fillArea = false)
+            drawSeries(samples.map { it.downloadBps }, dlColor, fillArea = true)
 
-            // Vertical scrub cursor
             inspectedIndex?.let { idx ->
                 val x = idx * stepX
                 drawLine(
-                    color = Color.White.copy(alpha = 0.7f),
+                    color = dlColor.copy(alpha = 0.7f),
                     start = Offset(x, 0f),
                     end = Offset(x, h),
-                    strokeWidth = 1.5.dp.toPx()
+                    strokeWidth = 1.dp.toPx()
                 )
             }
         }

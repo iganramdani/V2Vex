@@ -59,6 +59,9 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
     private val _isTestingBatch = MutableStateFlow(false)
     val isTestingBatch: StateFlow<Boolean> = _isTestingBatch.asStateFlow()
 
+    private val _isGeneratingWarp = MutableStateFlow(false)
+    val isGeneratingWarp: StateFlow<Boolean> = _isGeneratingWarp.asStateFlow()
+
     private val _speedProgress = MutableStateFlow(SpeedTestProgress())
     val speedProgress: StateFlow<SpeedTestProgress> = _speedProgress.asStateFlow()
 
@@ -111,6 +114,14 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun toggleBlockQuic() {
+        updateSettings(hotReloadVpn = true) {
+            it.copy(blockQuic = !it.blockQuic)
+        }
+        val on = settings.value.blockQuic
+        emitMessage("QUIC (UDP:443): ${if (on) "BLOCKED" else "ALLOWED"}")
+    }
+
     fun toggleFragment() {
         updateSettings(hotReloadVpn = true) {
             it.copy(fragment = it.fragment.copy(enabled = !it.fragment.enabled))
@@ -132,6 +143,37 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
         val next = presets[(presets.indexOf(settings.value.routingPreset) + 1) % presets.size]
         updateSettings(hotReloadVpn = true) { it.copy(routingPreset = next) }
         emitMessage("Routing: ${next.label}")
+    }
+
+    fun addQuickDomainRule(domain: String, target: com.v2vex.client.model.RuleTarget) {
+        val rule = com.v2vex.client.model.CustomRoutingRule(
+            name = "${target.label} $domain",
+            matchType = com.v2vex.client.model.RuleMatchType.DOMAIN,
+            values = "domain:$domain",
+            target = target
+        )
+        updateSettings(hotReloadVpn = true) {
+            it.copy(customRules = listOf(rule) + it.customRules)
+        }
+        emitMessage("Added rule: domain:$domain -> ${target.label}")
+    }
+
+    fun generateFreeWarp() {
+        if (_isGeneratingWarp.value) return
+        viewModelScope.launch {
+            _isGeneratingWarp.value = true
+            emitMessage("Registering free Cloudflare WARP Curve25519 identity...")
+            com.v2vex.client.core.WarpGenerator.generateFreeWarpProfile().fold(
+                onSuccess = { profile ->
+                    app.repository.upsertProfile(profile)
+                    emitMessage("Created '${profile.name}' (ready for direct or Multi-Hop Chain!)")
+                },
+                onFailure = { err ->
+                    emitMessage("WARP registration failed: ${err.message}")
+                }
+            )
+            _isGeneratingWarp.value = false
+        }
     }
 
     /**

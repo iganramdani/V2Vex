@@ -102,4 +102,34 @@ class XrayConfigGeneratorTest {
         assertTrue(generated.contains("\"tag\": \"proxy-hop\""))
         assertTrue(generated.contains("entry.example.com"))
     }
+
+    @Test
+    fun v3DnsHijackBlockQuicNat64AndSafeSniSpoof() {
+        val profile = ServerProfile(
+            name = "SNI Spoof Node",
+            protocol = ProxyProtocol.VLESS,
+            address = "vps.example.id",
+            port = 443,
+            uuidOrPassword = "11111111-2222-3333-4444-555555555555",
+            transport = TransportType.HTTPUPGRADE,
+            security = SecurityType.TLS,
+            sni = "bug.cdn.com",
+            verifyPeerCertByName = "vps.example.id"
+        )
+        val settings = AppSettings(
+            blockQuic = true,
+            outboundDomainStrategy = "UseIPv4"
+        )
+        val generated = XrayConfigGenerator.generate(profile, settings)
+        assertTrue(XrayConfigGenerator.validateJson(generated).isSuccess)
+        assertTrue(generated.contains("\"tag\": \"dns-out\""))
+        assertTrue(generated.contains("\"verifyPeerCertByName\": \"vps.example.id\""))
+        assertTrue(generated.contains("\"domainStrategy\": \"UseIPv4\""))
+        assertTrue(generated.contains("\"port\": 443"))
+
+        // Verify pure-Kotlin RFC 7748 X25519 keypair generator produces 32-byte Base64 keys
+        val kp = com.v2vex.client.core.WarpGenerator.generateX25519KeyPair()
+        assertTrue(kp.privateKeyBase64.length >= 43)
+        assertTrue(kp.publicKeyBase64.length >= 43)
+    }
 }

@@ -4,17 +4,18 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Outer Cyber Ring -->
+    <!-- Minimalist Hairline Ring (Tone 2 Subtle) -->
     <path
-        android:strokeColor="#00E676"
-        android:strokeWidth="3.5"
+        android:strokeColor="#2A2C32"
+        android:strokeWidth="2.5"
         android:fillColor="#00000000"
-        android:pathData="M54,18 A36,36 0 1,1 53.99,18 Z" />
-    <!-- Sharp V2Vex Emblem -->
+        android:pathData="M54,20 A34,34 0 1,1 53.99,20 Z" />
+    <!-- Pure Crisp Chalk V2Vex Monogram (Tone 1) -->
     <path
-        android:fillColor="#00E5FF"
-        android:pathData="M31,34 L43,34 L54,62 L65,34 L77,34 L59,78 L49,78 Z" />
+        android:fillColor="#F4F4F6"
+        android:pathData="M32,35 L43,35 L54,63 L65,35 L76,35 L58.5,77 L49.5,77 Z" />
+    <!-- Signal Dot -->
     <path
-        android:fillColor="#00E676"
-        android:pathData="M48,34 L54,48 L60,34 Z" />
+        android:fillColor="#10B981"
+        android:pathData="M54,33 A4,4 0 1,1 53.99,33 Z" />
 </vector>

@@ -20,13 +20,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -45,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,9 +56,7 @@ import com.v2vex.client.ui.components.ConnectionOrb
 import com.v2vex.client.ui.components.LiveTrafficChart
 import com.v2vex.client.ui.theme.XrayAmber
 import com.v2vex.client.ui.theme.XrayCoral
-import com.v2vex.client.ui.theme.XrayCyan
 import com.v2vex.client.ui.theme.XrayEmerald
-import com.v2vex.client.ui.theme.XrayViolet
 import kotlinx.coroutines.delay
 
 @Composable
@@ -76,6 +71,7 @@ fun DashboardScreen(
     onOpenCoreSettings: () -> Unit,
     onOpenLogs: () -> Unit,
     onPingSelected: () -> Unit,
+    onToggleBlockQuic: () -> Unit,
     onToggleFragment: () -> Unit,
     onToggleMux: () -> Unit,
     onCycleRouting: () -> Unit
@@ -95,6 +91,10 @@ fun DashboardScreen(
         } else ""
     }
 
+    val primaryTone = MaterialTheme.colorScheme.primary
+    val signalTone = MaterialTheme.colorScheme.secondary
+    val outlineTone = MaterialTheme.colorScheme.outline
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -102,7 +102,7 @@ fun DashboardScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Top Header with Philosophy Badge, 1-Tap Live Logs, & Core Pill
+        // Two-Tone Minimalist Header
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -112,39 +112,36 @@ fun DashboardScreen(
                 Text(
                     text = "V2Vex",
                     style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.ExtraBold,
+                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 Text(
-                    text = "99% Fast & Light · L3 TUN",
+                    text = "v3.0 · 99% FAST & LIGHT",
                     style = MaterialTheme.typography.labelSmall,
-                    color = XrayCyan
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Surface(
                     onClick = onOpenLogs,
-                    shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    border = BorderStroke(1.dp, XrayCyan.copy(alpha = 0.45f))
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, outlineTone)
                 ) {
                     Text(
-                        text = "LIVE LOG",
+                        text = "LOG .TXT",
                         style = MaterialTheme.typography.labelSmall,
-                        color = XrayCyan,
+                        color = primaryTone,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
 
                 Surface(
                     onClick = onOpenCoreSettings,
-                    shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    border = BorderStroke(
-                        1.dp,
-                        if (coreInfo.executable) XrayEmerald.copy(alpha = 0.5f) else XrayAmber.copy(alpha = 0.5f)
-                    )
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, outlineTone)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -152,13 +149,13 @@ fun DashboardScreen(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(7.dp)
+                                .size(6.dp)
                                 .clip(CircleShape)
-                                .background(if (coreInfo.executable) XrayEmerald else XrayAmber)
+                                .background(if (coreInfo.executable) signalTone else XrayAmber)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (coreInfo.executable) "Core OK" else "No Core",
+                            text = if (coreInfo.executable) "CORE OK" else "NO CORE",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -167,29 +164,28 @@ fun DashboardScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
-        // Interactive Power Orb
+        // Geometric Minimalist Dial
         ConnectionOrb(
             state = snapshot.state,
             durationLabel = durationStr,
             onToggle = onToggleVpn
         )
 
+        Spacer(modifier = Modifier.height(6.dp))
         if (!snapshot.lastError.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = snapshot.lastError,
                 style = MaterialTheme.typography.labelSmall,
                 color = XrayCoral
             )
         } else {
-            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = if (snapshot.state == VpnConnectionState.CONNECTED) {
-                    "${snapshot.coreMode} · SOCKS :${settings.socksPort} · HTTP :${settings.httpPort}"
+                    "${snapshot.coreMode} · PURE L3 TELEMETRY"
                 } else {
-                    "Zero-bloat standby · Tap orb to establish tunnel"
+                    "STANDBY · ZERO BACKGROUND DRAIN"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -198,45 +194,41 @@ fun DashboardScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Active Node Card
+        // Active Node Minimalist Selector Card
         Card(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onOpenNodes),
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+            border = BorderStroke(1.dp, outlineTone)
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(14.dp),
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = XrayCyan.copy(alpha = 0.14f),
-                    modifier = Modifier.size(44.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Rounded.Star,
-                            contentDescription = null,
-                            tint = XrayCyan
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (snapshot.state == VpnConnectionState.CONNECTED) signalTone
+                            else MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    }
-                }
+                )
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = selectedProfile?.name ?: "No Node Selected",
+                        text = selectedProfile?.name ?: "Select Server Node",
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = selectedProfile?.let { "${it.shortBadge()} · ${it.address}:${it.port}" }
-                            ?: "Tap to add or import a server node",
+                            ?: "Tap to import or create a node",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -246,27 +238,22 @@ fun DashboardScreen(
                 selectedProfile?.latencyMs?.let { ms ->
                     val pillColor = when {
                         ms < 0 -> XrayCoral
-                        ms < 90 -> XrayEmerald
-                        ms < 220 -> XrayAmber
-                        else -> XrayCoral
+                        ms < 150 -> signalTone
+                        else -> primaryTone
                     }
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = pillColor.copy(alpha = 0.15f)
-                    ) {
-                        Text(
-                            text = if (ms < 0) "ERR" else "${ms}ms",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = pillColor,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
+                    Text(
+                        text = if (ms < 0) "ERR" else "${ms}ms",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = pillColor,
+                        modifier = Modifier.padding(horizontal = 6.dp)
+                    )
                 }
-                IconButton(onClick = onPingSelected) {
+                IconButton(onClick = onPingSelected, modifier = Modifier.size(34.dp)) {
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
-                        contentDescription = "Test Node Delay",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        contentDescription = "Test Delay",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
                 Icon(
@@ -277,39 +264,39 @@ fun DashboardScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Real-Time Speed Metrics Row
+        // Tabular Monospace Speed Tiles
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             MetricTile(
-                title = "Download",
+                title = "DOWNLOAD",
                 value = SpeedMath.formatSpeed(snapshot.currentDownloadBps, settings.speedUnit),
-                subtitle = "Total: ${SpeedMath.formatBytes(snapshot.totalDownloadBytes)}",
+                subtitle = "Σ ${SpeedMath.formatBytes(snapshot.totalDownloadBytes)}",
                 icon = Icons.Rounded.KeyboardArrowDown,
-                accent = XrayCyan,
+                accent = primaryTone,
                 modifier = Modifier.weight(1f)
             )
             MetricTile(
-                title = "Upload",
+                title = "UPLOAD",
                 value = SpeedMath.formatSpeed(snapshot.currentUploadBps, settings.speedUnit),
-                subtitle = "Total: ${SpeedMath.formatBytes(snapshot.totalUploadBytes)}",
+                subtitle = "Σ ${SpeedMath.formatBytes(snapshot.totalUploadBytes)}",
                 icon = Icons.Rounded.KeyboardArrowUp,
-                accent = XrayEmerald,
+                accent = signalTone,
                 modifier = Modifier.weight(1f)
             )
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Interactive Live Throughput Chart
+        // Two-Tone Minimalist Throughput Chart
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+            border = BorderStroke(1.dp, outlineTone)
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 LiveTrafficChart(
@@ -319,66 +306,65 @@ fun DashboardScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Power-User Quick Controls Grid (live hot-reload!)
+        // 4 Minimalist Engine Pills (Hot-Reload)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            QuickToggleChip(
-                label = "Routing",
+            MinimalToggleTile(
+                label = "ROUTING",
                 value = when (settings.routingPreset) {
                     RoutingPreset.GLOBAL -> "Global"
-                    RoutingPreset.BYPASS_LAN -> "Bypass LAN"
-                    RoutingPreset.ADBLOCK_BYPASS_LAN -> "AdBlock+"
+                    RoutingPreset.BYPASS_LAN -> "Bypass"
+                    RoutingPreset.ADBLOCK_BYPASS_LAN -> "AdBlock"
                     RoutingPreset.CUSTOM -> "Custom"
                 },
                 active = true,
-                accent = XrayCyan,
-                icon = Icons.Rounded.Settings,
                 onClick = onCycleRouting,
                 modifier = Modifier.weight(1f)
             )
-            QuickToggleChip(
-                label = "DPI Fragment",
+            MinimalToggleTile(
+                label = "QUIC 443",
+                value = if (settings.blockQuic) "BLOCK" else "ALLOW",
+                active = settings.blockQuic,
+                onClick = onToggleBlockQuic,
+                modifier = Modifier.weight(1f)
+            )
+            MinimalToggleTile(
+                label = "DPI FRAG",
                 value = if (settings.fragment.enabled) "ON" else "OFF",
                 active = settings.fragment.enabled,
-                accent = XrayViolet,
-                icon = Icons.Rounded.Build,
                 onClick = onToggleFragment,
                 modifier = Modifier.weight(1f)
             )
-            QuickToggleChip(
-                label = "Mux.Cool",
+            MinimalToggleTile(
+                label = "MUX",
                 value = if (settings.mux.enabled) "x${settings.mux.concurrency}" else "OFF",
                 active = settings.mux.enabled,
-                accent = XrayEmerald,
-                icon = Icons.Rounded.Star,
                 onClick = onToggleMux,
                 modifier = Modifier.weight(1f)
             )
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // SpeedLab Launch Banner
+        // SpeedLab Minimalist Launch Strip
         Surface(
             onClick = onOpenSpeedLab,
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-            border = BorderStroke(1.dp, XrayCyan.copy(alpha = 0.35f)),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, outlineTone),
             modifier = Modifier.fillMaxWidth()
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = XrayCyan)
-                Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Open SpeedLab v2 Benchmark",
+                        text = "SpeedLab Benchmark",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
@@ -388,7 +374,11 @@ fun DashboardScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = XrayCyan)
+                Icon(
+                    Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = primaryTone
+                )
             }
         }
 
@@ -407,24 +397,24 @@ private fun MetricTile(
 ) {
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
+                Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = value,
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
@@ -441,47 +431,41 @@ private fun MetricTile(
 }
 
 @Composable
-private fun QuickToggleChip(
+private fun MinimalToggleTile(
     label: String,
     value: String,
     active: Boolean,
-    accent: Color,
-    icon: ImageVector,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val signalTone = MaterialTheme.colorScheme.secondary
+    val outlineTone = MaterialTheme.colorScheme.outline
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(14.dp),
-        color = if (active) accent.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(12.dp),
+        color = if (active) signalTone.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surface,
         border = BorderStroke(
             1.dp,
-            if (active) accent.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+            if (active) signalTone.copy(alpha = 0.55f) else outlineTone
         ),
         modifier = modifier
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = if (active) accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1
             )
+            Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = value,
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
-                color = if (active) accent else MaterialTheme.colorScheme.onSurface,
+                color = if (active) signalTone else MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
             )
         }

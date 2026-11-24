@@ -1,7 +1,6 @@
 package com.v2vex.client.ui.components
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -12,6 +11,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -36,20 +36,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.v2vex.client.model.VpnConnectionState
-import com.v2vex.client.ui.theme.XrayAmber
-import com.v2vex.client.ui.theme.XrayCoral
-import com.v2vex.client.ui.theme.XrayCyan
-import com.v2vex.client.ui.theme.XrayEmerald
 
+/**
+ * Two-Tone Minimalist Geometric Connection Dial (Dieter Rams / Nothing OS inspired).
+ */
 @Composable
 fun ConnectionOrb(
     state: VpnConnectionState,
@@ -60,110 +58,87 @@ fun ConnectionOrb(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.93f else 1f,
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = 420f),
-        label = "orbScale"
+        targetValue = if (isPressed) 0.94f else 1f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 450f),
+        label = "dialScale"
     )
 
-    val accentColor by animateColorAsState(
+    val primaryTone = MaterialTheme.colorScheme.primary
+    val signalTone = MaterialTheme.colorScheme.secondary
+    val outlineTone = MaterialTheme.colorScheme.outline
+    val errorTone = MaterialTheme.colorScheme.error
+
+    val activeColor by animateColorAsState(
         targetValue = when (state) {
-            VpnConnectionState.CONNECTED -> XrayEmerald
-            VpnConnectionState.CONNECTING -> XrayAmber
-            VpnConnectionState.ERROR -> XrayCoral
-            else -> XrayCyan
+            VpnConnectionState.CONNECTED -> signalTone
+            VpnConnectionState.ERROR -> errorTone
+            else -> primaryTone
         },
-        animationSpec = tween(400),
-        label = "orbAccent"
+        animationSpec = tween(300),
+        label = "dialTone"
     )
 
-    val infinite = rememberInfiniteTransition(label = "orbAnim")
-    val pulse by infinite.animateFloat(
-        initialValue = 0.94f,
-        targetValue = 1.07f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "orbPulse"
-    )
+    val infinite = rememberInfiniteTransition(label = "dialSpin")
     val spinAngle by infinite.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1400, easing = LinearEasing),
+            animation = tween(2400, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
-        label = "orbSpin"
+        label = "spin"
     )
-
-    val surfaceColor = MaterialTheme.colorScheme.surface
 
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .size(216.dp)
+            .size(196.dp)
             .scale(scale)
     ) {
-        Canvas(modifier = Modifier.size(216.dp)) {
+        Canvas(modifier = Modifier.size(196.dp)) {
             val center = Offset(size.width / 2f, size.height / 2f)
-            val baseRadius = size.minDimension / 2f - 12.dp.toPx()
+            val outerRadius = size.minDimension / 2f - 8.dp.toPx()
 
-            // Outer ambient glow ring
-            val glowRadius = if (state == VpnConnectionState.CONNECTED) baseRadius * pulse else baseRadius
+            // Architectural hairline track ring
             drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        accentColor.copy(alpha = if (state == VpnConnectionState.CONNECTED) 0.28f else 0.12f),
-                        Color.Transparent
-                    ),
-                    center = center,
-                    radius = glowRadius + 16.dp.toPx()
-                ),
-                radius = glowRadius + 16.dp.toPx(),
-                center = center
-            )
-
-            // Static track ring
-            drawCircle(
-                color = accentColor.copy(alpha = 0.18f),
-                radius = baseRadius - 8.dp.toPx(),
+                color = outlineTone,
+                radius = outerRadius,
                 center = center,
-                style = Stroke(width = 4.dp.toPx())
+                style = Stroke(width = 1.5.dp.toPx())
             )
 
-            // Active animated arc
+            // Minimalist precision arc when connecting or connected
             if (state == VpnConnectionState.CONNECTING || state == VpnConnectionState.CONNECTED) {
-                rotate(degrees = if (state == VpnConnectionState.CONNECTING) spinAngle else spinAngle * 0.25f) {
-                    val arcSize = (baseRadius - 8.dp.toPx()) * 2f
-                    val topLeft = Offset(center.x - arcSize / 2f, center.y - arcSize / 2f)
+                rotate(degrees = if (state == VpnConnectionState.CONNECTING) spinAngle else -90f) {
+                    val d = outerRadius * 2f
                     drawArc(
-                        brush = Brush.sweepGradient(
-                            colors = listOf(Color.Transparent, accentColor, accentColor.copy(alpha = 0.4f))
-                        ),
+                        color = activeColor,
                         startAngle = 0f,
-                        sweepAngle = if (state == VpnConnectionState.CONNECTING) 140f else 260f,
+                        sweepAngle = if (state == VpnConnectionState.CONNECTING) 90f else 360f,
                         useCenter = false,
-                        topLeft = topLeft,
-                        size = Size(arcSize, arcSize),
-                        style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+                        topLeft = Offset(center.x - outerRadius, center.y - outerRadius),
+                        size = Size(d, d),
+                        style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
                     )
                 }
             }
         }
 
-        // Clickable core button
+        // Tactile Two-Tone Center Button
+        val isConnected = state == VpnConnectionState.CONNECTED
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .size(152.dp)
+                .size(148.dp)
                 .clip(CircleShape)
                 .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            surfaceColor.copy(alpha = 0.96f),
-                            accentColor.copy(alpha = 0.14f)
-                        )
-                    )
+                    if (isConnected) activeColor.copy(alpha = 0.10f)
+                    else MaterialTheme.colorScheme.surface
+                )
+                .border(
+                    width = 1.dp,
+                    color = if (isConnected) activeColor.copy(alpha = 0.55f) else outlineTone,
+                    shape = CircleShape
                 )
                 .clickable(
                     interactionSource = interactionSource,
@@ -173,26 +148,27 @@ fun ConnectionOrb(
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
-                    imageVector = if (state == VpnConnectionState.CONNECTED) Icons.Rounded.Lock else Icons.Rounded.PlayArrow,
-                    contentDescription = "Toggle VPN",
-                    tint = accentColor,
-                    modifier = Modifier.size(44.dp)
+                    imageVector = if (isConnected) Icons.Rounded.Lock else Icons.Rounded.PlayArrow,
+                    contentDescription = "Toggle Tunnel",
+                    tint = activeColor,
+                    modifier = Modifier.size(34.dp)
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = when (state) {
-                        VpnConnectionState.CONNECTED -> "ACTIVE"
-                        VpnConnectionState.CONNECTING -> "TUNNELING"
+                        VpnConnectionState.CONNECTED -> "CONNECTED"
+                        VpnConnectionState.CONNECTING -> "STARTING"
                         VpnConnectionState.ERROR -> "RETRY"
                         else -> "CONNECT"
                     },
-                    color = accentColor,
+                    color = activeColor,
+                    fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    letterSpacing = 1.6.sp
+                    fontSize = 12.sp,
+                    letterSpacing = 1.8.sp
                 )
-                if (state == VpnConnectionState.CONNECTED && durationLabel.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(2.dp))
+                if (isConnected && durationLabel.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(3.dp))
                     Text(
                         text = durationLabel,
                         style = MaterialTheme.typography.labelSmall,

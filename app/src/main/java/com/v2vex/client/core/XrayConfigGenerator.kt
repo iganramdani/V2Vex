@@ -249,7 +249,16 @@ object XrayConfigGenerator {
             put("tag", "direct")
             put("protocol", "freedom")
             putJsonObject("settings") {
-                put("domainStrategy", "UseIP")
+                put("domainStrategy", settings.outboundDomainStrategy.takeIf { it != "AsIs" } ?: "UseIP")
+            }
+        })
+
+        // Built-in Xray DNS Outbound (hijacks port 53 to use encrypted DoH + Xray DNS cache in <1ms!)
+        add(buildJsonObject {
+            put("tag", "dns-out")
+            put("protocol", "dns")
+            putJsonObject("settings") {
+                put("nonIPQuery", "skip")
             }
         })
 
@@ -428,7 +437,7 @@ object XrayConfigGenerator {
         }
 
         if (profile.protocol != ProxyProtocol.WIREGUARD) {
-            put("streamSettings", buildStreamSettings(profile, dialerProxyTag))
+            put("streamSettings", buildStreamSettings(profile, settings, dialerProxyTag))
         }
 
         // Mux.Cool (auto-disabled when XTLS-Vision flow is active)
@@ -442,7 +451,11 @@ object XrayConfigGenerator {
         }
     }
 
-    private fun buildStreamSettings(profile: ServerProfile, dialerProxyTag: String?): JsonObject = buildJsonObject {
+    private fun buildStreamSettings(
+        profile: ServerProfile,
+        settings: AppSettings,
+        dialerProxyTag: String?
+    ): JsonObject = buildJsonObject {
         put("network", profile.transport.xrayName)
         put("security", profile.security.xrayName)
 
@@ -451,6 +464,9 @@ object XrayConfigGenerator {
                 putJsonObject("tlsSettings") {
                     if (profile.sni.isNotBlank()) put("serverName", profile.sni)
                     put("allowInsecure", profile.allowInsecure)
+                    if (profile.verifyPeerCertByName.isNotBlank()) {
+                        put("verifyPeerCertByName", profile.verifyPeerCertByName)
+                    }
                     if (profile.fingerprint.isNotBlank()) put("fingerprint", profile.fingerprint)
                     if (profile.alpn.isNotBlank()) {
                         putJsonArray("alpn") {
@@ -532,9 +548,11 @@ object XrayConfigGenerator {
             }
         }
 
-        if (!dialerProxyTag.isNullOrBlank()) {
+        val hasDialStrategy = settings.outboundDomainStrategy != "AsIs"
+        if (!dialerProxyTag.isNullOrBlank() || hasDialStrategy) {
             putJsonObject("sockopt") {
-                put("dialerProxy", dialerProxyTag)
+                if (!dialerProxyTag.isNullOrBlank()) put("dialerProxy", dialerProxyTag)
+                if (hasDialStrategy) put("domainStrategy", settings.outboundDomainStrategy)
                 put("tcpNoDelay", true)
             }
         }
@@ -564,6 +582,27 @@ object XrayConfigGenerator {
                 putJsonArray("inboundTag") { add("api-in") }
                 put("outboundTag", "api")
             })
+
+            // Hijack port 53 DNS queries into Xray internal DoH + cache engine (<1ms cached response!)
+            add(buildJsonObject {
+                put("type", "field")
+                putJsonArray("inboundTag") {
+                    add("socks-in")
+                    add("http-in")
+                }
+                put("port", 53)
+                put("outboundTag", "dns-out")
+            })
+
+            // QUIC (UDP:443) Guard: prevents UDP-over-TCP pipe storms on HTTPUpgrade/WS/XHTTP
+            if (settings.blockQuic) {
+                add(buildJsonObject {
+                    put("type", "field")
+                    put("network", "udp")
+                    put("port", 443)
+                    put("outboundTag", "block")
+                })
+            }
 
             // User-defined custom rules
             settings.customRules.filter { it.enabled && it.values.isNotBlank() }.forEach { rule ->

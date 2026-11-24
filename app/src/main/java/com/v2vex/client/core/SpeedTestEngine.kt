@@ -32,6 +32,11 @@ import java.util.concurrent.atomic.AtomicLong
  *    progressive chunks (eliminates local TCP send-buffer false spikes!).
  * 3. Multi-Stream Download with warm-up discard + trimmed mean + monotonic System.nanoTime().
  */
+object SpeedLabTrafficCounter {
+    val rxBytes = AtomicLong(0L)
+    val txBytes = AtomicLong(0L)
+}
+
 class SpeedTestEngine {
 
     suspend fun runBenchmark(
@@ -249,6 +254,7 @@ class SpeedTestEngine {
                                 val read = input.read(buf)
                                 if (read <= 0) break
                                 totalBytes.addAndGet(read.toLong())
+                                SpeedLabTrafficCounter.rxBytes.addAndGet(read.toLong())
                             }
                         }
                     } catch (_: Throwable) {
@@ -346,6 +352,7 @@ class SpeedTestEngine {
                         runCatching { conn.inputStream.close() }
                         if (code in 200..299) {
                             ackedBytes.addAndGet(chunk.size.toLong())
+                            SpeedLabTrafficCounter.txBytes.addAndGet(chunk.size.toLong())
                         }
                     } catch (_: Throwable) {
                         delay(150)

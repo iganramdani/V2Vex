@@ -67,7 +67,7 @@ jobs:
 
           TAG_NAME="${GITHUB_REF_NAME}"
           if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
-            TAG_NAME="v1.1.0-ci"
+            TAG_NAME="v3.0.0-ci"
           fi
           APK_NAME="V2Vex-${TAG_NAME}-arm64-v8a-release.apk"
 
@@ -99,16 +99,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" "${APK_NAME}" \
-            --title "V2Vex ${GITHUB_REF_NAME} — Modular Dual-Core · Real-Time Full Log · Precision Speed Meter" \
-            --notes "## ⚡ V2Vex ${GITHUB_REF_NAME} — Phase 1–4 Complete
+            --title "V2Vex ${GITHUB_REF_NAME} — Two-Tone Minimalist Flagship" \
+            --notes "## ⚪⚫ V2Vex ${GITHUB_REF_NAME} — Two-Tone Minimalist Flagship
 
           ### 🔥 What's New in ${GITHUB_REF_NAME}
-          - 📊 **Fixed Live & Notification Speed Meter**: Removed \`setHttpProxy\` TUN bypass so 100% of HTTP/HTTPS/UDP/DNS traffic flows through L3 TUN; hybrid \`TProxyGetStats()\` + UID socket stats with EMA smoothing; **1-second live speed right in the notification title** + session totals!
-          - 🪵 **Real-Time Full Log Console**: 1-tap \`LIVE LOG\` button on Dashboard, 3000-line 100ms live stream, persistent rolling log file, global crash stacktrace recorder, 1-tap Xray \`debug/info/warning\` hot-reload switch, source/level/search filters, and 1-tap **Copy/Share Full Sanitized Bug Report**.
-          - 🧬 **Modular Dual-Core Engine (Phase 4)**: Smart Dual-Core (**Xray-core** + **Sing-box**), **Hysteria2** & **TUIC v5** protocol support, and external Android 10–15 W^X-compliant Core Plugin APK discovery (\`com.v2vex.core.xray\` / \`com.v2vex.core.singbox\`).
-          - 🛡️ **Observatory Auto-Failover & Multi-Hop Proxy Chain**: Xray \`observatory\` + \`leastPing\` load balancer across backup nodes + Multi-Hop \`dialerProxy\` chaining.
-          - 📱 **QR Code Sharing + Universal Subscription Parser**: ISO-18004 QR Code Generator on every node + import **Clash / Mihomo YAML** & **Sing-box JSON** subscriptions.
-          - 🎯 **SpeedLab v2 + Node vs Node Ranking**: Keep-Alive True RTT, Server-ACK Upload, and live Top-3 Node Speed Ranking.
+          - ⚪⚫ **Two-Tone Minimalist UX**: Architectural monochrome design (**Obsidian Two-Tone**, **AMOLED Monochrome**, **Paper & Ink**) with tabular monospace numerals and hairline geometry.
+          - 📊 **Zero-Loopback Pure L3 Speed Meter + Screen-Off Saver**: Calibrated on real Xiaomi Redmi Note 9 hardware — strictly \`TProxyGetStats()\` + \`SpeedLabTrafficCounter\` (eliminates 2.6x–7.3x Android eBPF loopback inflation) and pauses SystemUI wakeups when screen is locked!
+          - 🪵 **Native \`.txt\` Diagnostic Logger + Live Connection Firewall**: Pinned System Logs (never evicted by Xray debug stream) + Engine Logs, **Save \`.txt\` File (SAF)** & **Share \`logV2Vex.txt\` (\`FileProvider\`)**, plus real-time domain monitor with 1-tap \`Block\` / \`Direct\` rules.
+          - 🧪 **BugHost / CDN Sniper Studio + Safe SNI Spoofing**: Concurrent TLS SNI + HTTP HEAD CDN scanner + \`verifyPeerCertByName\` certificate pinning (fixes SNI-spoof \`x509\` errors without \`allowInsecure\`!).
+          - ☁️ **1-Click Free Cloudflare WARP Generator**: Pure-Kotlin RFC 7748 Curve25519 registration for instant clean-IP WireGuard & Multi-Hop Proxy Chaining.
+          - ⚡ **Port-53 \`dns-out\` Hijack · QUIC 443 Guard · NAT64 \`UseIPv4\` Fix · MIUI Battery Saver Helper · Tasker Intents · Open-Source Credits**.
 
-          ### 📦 Included in this APK
-          - Official **XTLS/Xray-core \`${CORE_VER}\`** (\`arm64-v8a\`) + native C **\`hev-socks5-tunnel\`** L3 TUN + \`geoip.dat\` & \`geosite.dat\`"
+          ### 🙏 Respect & Attribution
+          Powered by **XTLS/Xray-core** (\`${CORE_VER}\`), **heiher/hev-socks5-tunnel**, and **Loyalsoldier/v2ray-rules-dat**. Full credits in [CREDITS.md](https://github.com/iganramdani/V2Vex/blob/main/CREDITS.md)."

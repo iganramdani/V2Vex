@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -31,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.v2vex.client.core.SingBoxConfigGenerator
 import com.v2vex.client.core.XrayConfigGenerator
 import com.v2vex.client.model.AppSettings
 import com.v2vex.client.model.ProxyProtocol
@@ -52,10 +52,14 @@ fun ProfileEditorDialog(
     var showPreviewJson by remember { mutableStateOf(false) }
 
     if (showPreviewJson) {
-        val generated = remember(draft, settings) { XrayConfigGenerator.generate(draft, settings) }
+        val isSingBoxProto = draft.protocol == ProxyProtocol.HYSTERIA2 || draft.protocol == ProxyProtocol.TUIC
+        val generated = remember(draft, settings) {
+            if (isSingBoxProto) SingBoxConfigGenerator.generate(draft, settings)
+            else XrayConfigGenerator.generate(draft, settings)
+        }
         AlertDialog(
             onDismissRequest = { showPreviewJson = false },
-            title = { Text("Generated Xray-core JSON") },
+            title = { Text(if (isSingBoxProto) "Generated Sing-box JSON" else "Generated Xray-core JSON") },
             text = {
                 OutlinedTextField(
                     value = generated,
@@ -116,7 +120,7 @@ fun ProfileEditorDialog(
                     OutlinedTextField(
                         value = draft.rawJson,
                         onValueChange = { draft = draft.copy(rawJson = it) },
-                        label = { Text("Raw Xray JSON Configuration") },
+                        label = { Text("Raw Engine JSON") },
                         textStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -133,7 +137,7 @@ fun ProfileEditorDialog(
                         OutlinedTextField(
                             value = draft.address,
                             onValueChange = { draft = draft.copy(address = it.trim()) },
-                            label = { Text("Server Host / IP") },
+                            label = { Text("Server Host / CDN IP") },
                             singleLine = true,
                             modifier = Modifier.weight(2f)
                         )
@@ -150,11 +154,16 @@ fun ProfileEditorDialog(
                         )
                     }
 
-                    if (draft.protocol == ProxyProtocol.SOCKS || draft.protocol == ProxyProtocol.HTTP) {
+                    if (draft.protocol == ProxyProtocol.SOCKS ||
+                        draft.protocol == ProxyProtocol.HTTP ||
+                        draft.protocol == ProxyProtocol.TUIC
+                    ) {
                         OutlinedTextField(
                             value = draft.username,
-                            onValueChange = { draft = draft.copy(username = it) },
-                            label = { Text("Username (optional)") },
+                            onValueChange = { draft = draft.copy(username = it.trim()) },
+                            label = {
+                                Text(if (draft.protocol == ProxyProtocol.TUIC) "TUIC UUID" else "Username (optional)")
+                            },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -176,27 +185,46 @@ fun ProfileEditorDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    if (draft.protocol == ProxyProtocol.VLESS) {
+                    if (draft.protocol == ProxyProtocol.HYSTERIA2) {
                         OutlinedTextField(
-                            value = draft.flow,
-                            onValueChange = { draft = draft.copy(flow = it.trim()) },
-                            label = { Text("Flow (e.g. xtls-rprx-vision)") },
+                            value = draft.sni,
+                            onValueChange = { draft = draft.copy(sni = it.trim()) },
+                            label = { Text("TLS SNI") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
-                    }
-
-                    if (draft.protocol == ProxyProtocol.SHADOWSOCKS || draft.protocol == ProxyProtocol.VMESS) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = draft.obfsType,
+                                onValueChange = { draft = draft.copy(obfsType = it.trim()) },
+                                label = { Text("Obfs (salamander)") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = draft.obfsPassword,
+                                onValueChange = { draft = draft.copy(obfsPassword = it.trim()) },
+                                label = { Text("Obfs Password") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    } else if (draft.protocol == ProxyProtocol.TUIC) {
                         OutlinedTextField(
-                            value = draft.encryption,
-                            onValueChange = { draft = draft.copy(encryption = it.trim()) },
-                            label = { Text("Cipher / Encryption") },
+                            value = draft.sni,
+                            onValueChange = { draft = draft.copy(sni = it.trim()) },
+                            label = { Text("TLS SNI") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
-                    }
-
-                    if (draft.protocol == ProxyProtocol.WIREGUARD) {
+                        OutlinedTextField(
+                            value = draft.congestionControl,
+                            onValueChange = { draft = draft.copy(congestionControl = it.trim()) },
+                            label = { Text("Congestion Control (bbr / cubic)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else if (draft.protocol == ProxyProtocol.WIREGUARD) {
                         OutlinedTextField(
                             value = draft.wgPeerPublicKey,
                             onValueChange = { draft = draft.copy(wgPeerPublicKey = it.trim()) },
@@ -207,19 +235,37 @@ fun ProfileEditorDialog(
                         OutlinedTextField(
                             value = draft.wgLocalAddress,
                             onValueChange = { draft = draft.copy(wgLocalAddress = it.trim()) },
-                            label = { Text("Local Address (e.g. 10.0.0.2/32)") },
+                            label = { Text("Local Address (e.g. 172.16.0.2/32)") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
                         OutlinedTextField(
                             value = draft.wgReserved,
                             onValueChange = { draft = draft.copy(wgReserved = it.trim()) },
-                            label = { Text("Reserved Bytes (optional, e.g. 12,34,56)") },
+                            label = { Text("Reserved Bytes (e.g. 12,34,56)") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
                     } else {
-                        // Transport Selector
+                        if (draft.protocol == ProxyProtocol.VLESS) {
+                            OutlinedTextField(
+                                value = draft.flow,
+                                onValueChange = { draft = draft.copy(flow = it.trim()) },
+                                label = { Text("Flow (e.g. xtls-rprx-vision)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        if (draft.protocol == ProxyProtocol.SHADOWSOCKS || draft.protocol == ProxyProtocol.VMESS) {
+                            OutlinedTextField(
+                                value = draft.encryption,
+                                onValueChange = { draft = draft.copy(encryption = it.trim()) },
+                                label = { Text("Cipher / Encryption") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
                         Text("Transport", style = MaterialTheme.typography.labelMedium)
                         Row(
                             modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -253,7 +299,6 @@ fun ProfileEditorDialog(
                             )
                         }
 
-                        // Security Selector
                         Text("Security", style = MaterialTheme.typography.labelMedium)
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             SecurityType.entries.forEach { sec ->
@@ -269,20 +314,39 @@ fun ProfileEditorDialog(
                             OutlinedTextField(
                                 value = draft.sni,
                                 onValueChange = { draft = draft.copy(sni = it.trim()) },
-                                label = { Text("SNI / Server Name") },
+                                label = { Text("SNI (Bug Host / Server Name)") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
                             OutlinedTextField(
                                 value = draft.fingerprint,
                                 onValueChange = { draft = draft.copy(fingerprint = it.trim()) },
-                                label = { Text("uTLS Fingerprint (chrome/firefox/safari/randomized)") },
+                                label = { Text("uTLS Fingerprint (chrome/android/firefox)") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
 
                         if (draft.security == SecurityType.TLS) {
+                            OutlinedTextField(
+                                value = draft.verifyPeerCertByName,
+                                onValueChange = { draft = draft.copy(verifyPeerCertByName = it.trim()) },
+                                label = { Text("Verify Real Cert Domain (Safe SNI Spoof)") },
+                                placeholder = { Text("e.g. your-vps.domain.com") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            if (draft.sni.isNotBlank() &&
+                                draft.address.isNotBlank() &&
+                                draft.sni != draft.address &&
+                                draft.verifyPeerCertByName.isBlank()
+                            ) {
+                                TextButton(
+                                    onClick = { draft = draft.copy(verifyPeerCertByName = draft.address) }
+                                ) {
+                                    Text("Pin cert to '${draft.address}' (Fix SNI Spoof x509 error)")
+                                }
+                            }
                             OutlinedTextField(
                                 value = draft.alpn,
                                 onValueChange = { draft = draft.copy(alpn = it.trim()) },
@@ -333,7 +397,7 @@ fun ProfileEditorDialog(
                         onClick = { showPreviewJson = true },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Preview Generated Xray JSON")
+                        Text("Preview Engine JSON")
                     }
                 }
             }
@@ -343,7 +407,7 @@ fun ProfileEditorDialog(
                 enabled = rawJsonValidation.isSuccess,
                 onClick = { onSave(draft) }
             ) {
-                Text("Save Node")
+                Text("Save")
             }
         },
         dismissButton = {

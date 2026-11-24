@@ -64,6 +64,7 @@ data class ServerProfile(
     val fingerprint: String = "chrome",
     val alpn: String = "",
     val allowInsecure: Boolean = false,
+    val verifyPeerCertByName: String = "",   // Safe SNI Spoof: verify real VPS cert CN while sending spoofed SNI
     val realityPublicKey: String = "",
     val realityShortId: String = "",
     val realitySpiderX: String = "",

@@ -1,6 +1,9 @@
 package com.v2vex.client.ui.screens
 
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +37,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -44,54 +48,96 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import com.v2vex.client.core.LogBuffer
 import com.v2vex.client.core.LogLevel
+import com.v2vex.client.model.RuleTarget
 import com.v2vex.client.ui.theme.XrayAmber
 import com.v2vex.client.ui.theme.XrayCoral
-import com.v2vex.client.ui.theme.XrayCyan
 import com.v2vex.client.ui.theme.XrayEmerald
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+private enum class LogTab(val label: String) {
+    ALL("All Logs"),
+    SYSTEM("System (Pinned)"),
+    FIREWALL("Live Connections")
+}
 
 @Composable
 fun LogsScreen(
     xrayLogLevel: String,
     extraReportHeader: String,
     onChangeXrayLogLevel: (String) -> Unit,
+    onQuickDomainRule: (domain: String, target: RuleTarget) -> Unit,
     onBack: () -> Unit,
     onMessage: (String) -> Unit
 ) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val logs by LogBuffer.logs.collectAsState()
+    val connections by LogBuffer.recentConnections.collectAsState()
 
+    var activeTab by remember { mutableStateOf(LogTab.ALL) }
     var levelFilter by remember { mutableStateOf<LogLevel?>(null) }
-    var sourceFilter by remember { mutableStateOf<String?>(null) }
     var searchQuery by remember { mutableStateOf("") }
     var autoScroll by remember { mutableStateOf(true) }
 
-    val sources = remember(logs) {
-        logs.map { it.source }.distinct().sorted()
+    // SAF .txt file saver
+    val saveTxtLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            val report = LogBuffer.buildFullBugReport(context, extraReportHeader)
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                out.write(report.toByteArray(Charsets.UTF_8))
+            }
+            onMessage("Saved diagnostic log (.txt) successfully")
+        }.onFailure { err ->
+            onMessage("Failed to save .txt: ${err.message}")
+        }
     }
 
-    val filtered = remember(logs, levelFilter, sourceFilter, searchQuery) {
+    fun shareTxtFile() {
+        runCatching {
+            val txtFile = LogBuffer.exportTxtReportFile(context, extraReportHeader)
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                txtFile
+            )
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "logV2Vex.txt")
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Share logV2Vex.txt"))
+        }.onFailure { err ->
+            onMessage("Share .txt failed: ${err.message}")
+        }
+    }
+
+    val filtered = remember(logs, activeTab, levelFilter, searchQuery) {
         logs.filter { entry ->
+            val matchTab = if (activeTab == LogTab.SYSTEM) entry.isSystem else true
             val matchLevel = levelFilter == null || entry.level == levelFilter
-            val matchSrc = sourceFilter == null || entry.source.equals(sourceFilter, ignoreCase = true)
             val matchSearch = searchQuery.isBlank() ||
                 entry.message.contains(searchQuery, ignoreCase = true) ||
                 entry.source.contains(searchQuery, ignoreCase = true)
-            matchLevel && matchSrc && matchSearch
+            matchTab && matchLevel && matchSearch
         }
     }
 
     val listState = rememberLazyListState()
-    LaunchedEffect(filtered.size, autoScroll) {
-        if (autoScroll && filtered.isNotEmpty()) {
+    LaunchedEffect(filtered.size, autoScroll, activeTab) {
+        if (activeTab != LogTab.FIREWALL && autoScroll && filtered.isNotEmpty()) {
             listState.scrollToItem(filtered.size - 1)
         }
     }
@@ -99,9 +145,9 @@ fun LogsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
     ) {
-        // Header with LIVE indicator
+        // Minimalist Header
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -115,35 +161,27 @@ fun LogsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(8.dp)
+                                .size(7.dp)
                                 .clip(CircleShape)
                                 .background(if (autoScroll) XrayEmerald else XrayAmber)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Real-Time Full Log",
+                            text = "Diagnostic Log (.txt)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                     }
                     Text(
-                        text = "${filtered.size} / ${logs.size} lines · Xray=$xrayLogLevel",
+                        text = "${filtered.size} lines · Xray:$xrayLogLevel",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
             Row {
-                IconButton(onClick = {
-                    val report = LogBuffer.buildFullBugReport(context, extraReportHeader)
-                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_SUBJECT, "V2Vex Real-Time Diagnostic Log")
-                        putExtra(Intent.EXTRA_TEXT, report)
-                    }
-                    context.startActivity(Intent.createChooser(sendIntent, "Share V2Vex Bug Report"))
-                }) {
-                    Icon(Icons.Rounded.Share, contentDescription = "Share Bug Report", tint = XrayCyan)
+                IconButton(onClick = { shareTxtFile() }) {
+                    Icon(Icons.Rounded.Share, contentDescription = "Share logV2Vex.txt")
                 }
                 IconButton(onClick = {
                     LogBuffer.clear()
@@ -154,125 +192,185 @@ fun LogsScreen(
             }
         }
 
-        // Quick Action Row: Copy Full Bug Report + Auto-Scroll + Xray Verbosity
+        // Primary .txt Export Row
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Button(
                 onClick = {
-                    val report = LogBuffer.buildFullBugReport(context, extraReportHeader)
-                    clipboard.setText(AnnotatedString(report))
-                    onMessage("Copied full diagnostic bug report (${report.length} chars)")
+                    val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                    saveTxtLauncher.launch("logV2Vex_$stamp.txt")
                 },
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                Text("Copy Full Bug Report", style = MaterialTheme.typography.labelMedium)
+                Text("Save .txt File", style = MaterialTheme.typography.labelMedium)
+            }
+            OutlinedButton(
+                onClick = { shareTxtFile() },
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Share .txt", style = MaterialTheme.typography.labelMedium)
             }
             OutlinedButton(
                 onClick = { autoScroll = !autoScroll },
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text(if (autoScroll) "LIVE: ON" else "PAUSED", style = MaterialTheme.typography.labelMedium)
+                Text(if (autoScroll) "LIVE" else "PAUSE", style = MaterialTheme.typography.labelSmall)
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // Search box
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            placeholder = { Text("Search logs (e.g. error, tun, reality, dns)...") },
-            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
-            singleLine = true,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Xray Verbosity + Level Filter Row
+        // Mode Tabs: All | System (Pinned) | Live Connections Firewall
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            listOf("debug", "info", "warning").forEach { lvl ->
+            LogTab.entries.forEach { tab ->
                 FilterChip(
-                    selected = xrayLogLevel == lvl,
-                    onClick = { onChangeXrayLogLevel(lvl) },
-                    label = { Text("Xray:$lvl") }
-                )
-            }
-            Spacer(modifier = Modifier.width(4.dp))
-            FilterChip(
-                selected = levelFilter == null,
-                onClick = { levelFilter = null },
-                label = { Text("All") }
-            )
-            LogLevel.entries.forEach { lvl ->
-                FilterChip(
-                    selected = levelFilter == lvl,
-                    onClick = { levelFilter = if (levelFilter == lvl) null else lvl },
-                    label = { Text(lvl.tag) }
+                    selected = activeTab == tab,
+                    onClick = { activeTab = tab },
+                    label = {
+                        val suffix = if (tab == LogTab.FIREWALL) " (${connections.size})" else ""
+                        Text(tab.label + suffix)
+                    }
                 )
             }
         }
 
-        // Source Filter Chips
-        if (sources.isNotEmpty()) {
+        if (activeTab == LogTab.FIREWALL) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                if (connections.isEmpty()) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize().padding(20.dp)) {
+                        Text(
+                            text = "Set Xray verbosity to 'info' or 'debug' while connected to inspect live domains & apply 1-tap firewall rules.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize().padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(connections, key = { it.id }) { conn ->
+                            val cleanHost = conn.destination.substringBefore(" ").substringBefore(":")
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = conn.destination,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "${conn.timestamp} · ${conn.network} -> ${conn.outbound}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    if (cleanHost.any { it.isLetter() }) {
+                                        TextButton(onClick = { onQuickDomainRule(cleanHost, RuleTarget.DIRECT) }) {
+                                            Text("Direct", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                        TextButton(onClick = { onQuickDomainRule(cleanHost, RuleTarget.BLOCK) }) {
+                                            Text("Block", style = MaterialTheme.typography.labelSmall, color = XrayCoral)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Filter log stream...") },
+                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                singleLine = true,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(bottom = 6.dp),
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                FilterChip(
-                    selected = sourceFilter == null,
-                    onClick = { sourceFilter = null },
-                    label = { Text("All Sources") }
-                )
-                sources.forEach { src ->
+                listOf("warning", "info", "debug").forEach { lvl ->
                     FilterChip(
-                        selected = sourceFilter == src,
-                        onClick = { sourceFilter = if (sourceFilter == src) null else src },
-                        label = { Text(src) }
+                        selected = xrayLogLevel == lvl,
+                        onClick = { onChangeXrayLogLevel(lvl) },
+                        label = { Text("Xray:$lvl") }
+                    )
+                }
+                FilterChip(
+                    selected = levelFilter == null,
+                    onClick = { levelFilter = null },
+                    label = { Text("All") }
+                )
+                LogLevel.entries.forEach { lvl ->
+                    FilterChip(
+                        selected = levelFilter == lvl,
+                        onClick = { levelFilter = if (levelFilter == lvl) null else lvl },
+                        label = { Text(lvl.tag) }
                     )
                 }
             }
-        }
 
-        // Real-Time Log Stream
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surface,
-            modifier = Modifier.fillMaxSize()
-        ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(8.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+            Spacer(modifier = Modifier.height(6.dp))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxSize()
             ) {
-                items(filtered, key = { it.id }) { entry ->
-                    val color = when (entry.level) {
-                        LogLevel.ERROR -> XrayCoral
-                        LogLevel.WARN -> XrayAmber
-                        LogLevel.INFO -> XrayEmerald
-                        LogLevel.DEBUG -> XrayCyan
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    items(filtered, key = { it.id }) { entry ->
+                        val color = when (entry.level) {
+                            LogLevel.ERROR -> XrayCoral
+                            LogLevel.WARN -> XrayAmber
+                            LogLevel.INFO -> if (entry.isSystem) XrayEmerald else MaterialTheme.colorScheme.onSurface
+                            LogLevel.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                        Text(
+                            text = "${entry.timestamp} [${entry.level.tag}][${entry.source}] ${entry.message}",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            color = color
+                        )
                     }
-                    Text(
-                        text = "${entry.timestamp} [${entry.level.tag}][${entry.source}] ${entry.message}",
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                        color = color
-                    )
                 }
             }
         }

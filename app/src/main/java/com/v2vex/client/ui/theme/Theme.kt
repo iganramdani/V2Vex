@@ -12,73 +12,76 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.v2vex.client.model.ThemeMode
 
-val XrayCyan = Color(0xFF00E5FF)
-val XrayEmerald = Color(0xFF00E676)
-val XrayAmber = Color(0xFFFFB300)
-val XrayCoral = Color(0xFFFF5252)
-val XrayViolet = Color(0xFF7C4DFF)
+// Two-Tone Minimalist Tokens: Tone 1 (Monochrome Chalk/Ink) + Tone 2 (Surgical Signal Mint)
+val XrayCyan = Color(0xFFF4F4F6)      // Tone 1: Crisp Chalk (Primary Interactive)
+val XrayEmerald = Color(0xFF10B981)   // Tone 2: Surgical Signal Mint (Active Tunnel)
+val XrayAmber = Color(0xFFD97706)     // Muted Amber (Warning only)
+val XrayCoral = Color(0xFFEF4444)     // Clean Red (Error/Stop only)
+val XrayViolet = Color(0xFFA1A1AA)    // Neutral Zinc Secondary
 
-private val CyberDarkScheme = darkColorScheme(
-    primary = XrayCyan,
-    onPrimary = Color(0xFF001F24),
-    primaryContainer = Color(0xFF0A2E38),
-    onPrimaryContainer = Color(0xFFB4F8FF),
-    secondary = XrayEmerald,
-    onSecondary = Color(0xFF00210E),
-    secondaryContainer = Color(0xFF0A2F1E),
-    onSecondaryContainer = Color(0xFFB9F6CA),
-    tertiary = XrayViolet,
-    background = Color(0xFF090D16),
-    onBackground = Color(0xFFE6EDF7),
-    surface = Color(0xFF0F1624),
-    onSurface = Color(0xFFE6EDF7),
-    surfaceVariant = Color(0xFF172133),
-    onSurfaceVariant = Color(0xFF98A8C2),
-    outline = Color(0xFF26334B),
+private val ObsidianTwoToneScheme = darkColorScheme(
+    primary = Color(0xFFF4F4F6),
+    onPrimary = Color(0xFF0A0A0C),
+    primaryContainer = Color(0xFF1C1E24),
+    onPrimaryContainer = Color(0xFFF4F4F6),
+    secondary = Color(0xFF10B981),
+    onSecondary = Color(0xFF032217),
+    secondaryContainer = Color(0xFF0D2820),
+    onSecondaryContainer = Color(0xFFA7F3D0),
+    tertiary = Color(0xFFA1A1AA),
+    background = Color(0xFF0A0A0C),
+    onBackground = Color(0xFFF4F4F6),
+    surface = Color(0xFF121317),
+    onSurface = Color(0xFFF4F4F6),
+    surfaceVariant = Color(0xFF191B20),
+    onSurfaceVariant = Color(0xFF8E929F),
+    outline = Color(0xFF262932),
     error = XrayCoral
 )
 
-private val AmoledBlackScheme = CyberDarkScheme.copy(
+private val AmoledMonoScheme = ObsidianTwoToneScheme.copy(
     background = Color(0xFF000000),
-    surface = Color(0xFF0A0D12),
-    surfaceVariant = Color(0xFF121721),
-    outline = Color(0xFF1F2736)
+    surface = Color(0xFF09090B),
+    surfaceVariant = Color(0xFF121215),
+    outline = Color(0xFF1F2026)
 )
 
-private val CleanLightScheme = lightColorScheme(
-    primary = Color(0xFF007A8C),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFD0F4FA),
-    onPrimaryContainer = Color(0xFF00363F),
-    secondary = Color(0xFF008744),
+private val PaperInkLightScheme = lightColorScheme(
+    primary = Color(0xFF111215),
+    onPrimary = Color(0xFFF7F7F5),
+    primaryContainer = Color(0xFFE8E8E4),
+    onPrimaryContainer = Color(0xFF111215),
+    secondary = Color(0xFF059669),
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD5F5E3),
-    onSecondaryContainer = Color(0xFF00391B),
-    tertiary = Color(0xFF5E35B1),
-    background = Color(0xFFF4F7FB),
-    onBackground = Color(0xFF0F172A),
+    secondaryContainer = Color(0xFFD1FAE5),
+    onSecondaryContainer = Color(0xFF064E3B),
+    tertiary = Color(0xFF52525B),
+    background = Color(0xFFF6F6F3),
+    onBackground = Color(0xFF111215),
     surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF0F172A),
-    surfaceVariant = Color(0xFFE7EEF6),
-    onSurfaceVariant = Color(0xFF475569),
-    outline = Color(0xFFCBD5E1),
-    error = Color(0xFFD32F2F)
+    onSurface = Color(0xFF111215),
+    surfaceVariant = Color(0xFFEDEDEA),
+    onSurfaceVariant = Color(0xFF52525B),
+    outline = Color(0xFFD6D6D1),
+    error = Color(0xFFDC2626)
 )
 
 private val V2VexTypography = Typography(
     displaySmall = TextStyle(
+        fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Bold,
         fontSize = 32.sp,
-        letterSpacing = (-0.5).sp
+        letterSpacing = (-0.8).sp
     ),
     headlineSmall = TextStyle(
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 22.sp,
-        letterSpacing = (-0.2).sp
+        fontWeight = FontWeight.Bold,
+        fontSize = 21.sp,
+        letterSpacing = (-0.4).sp
     ),
     titleMedium = TextStyle(
         fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp
+        fontSize = 15.sp,
+        letterSpacing = (-0.1).sp
     ),
     bodyMedium = TextStyle(
         fontWeight = FontWeight.Normal,
@@ -87,12 +90,13 @@ private val V2VexTypography = Typography(
     labelMedium = TextStyle(
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
-        letterSpacing = 0.4.sp
+        letterSpacing = 0.3.sp
     ),
     labelSmall = TextStyle(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Medium,
-        fontSize = 11.sp
+        fontSize = 11.sp,
+        letterSpacing = 0.2.sp
     )
 )
 
@@ -102,9 +106,9 @@ fun V2VexTheme(
     content: @Composable () -> Unit
 ) {
     val scheme = when (themeMode) {
-        ThemeMode.CYBER_DARK -> CyberDarkScheme
-        ThemeMode.AMOLED_BLACK -> AmoledBlackScheme
-        ThemeMode.LIGHT -> CleanLightScheme
+        ThemeMode.CYBER_DARK -> ObsidianTwoToneScheme
+        ThemeMode.AMOLED_BLACK -> AmoledMonoScheme
+        ThemeMode.LIGHT -> PaperInkLightScheme
     }
     MaterialTheme(
         colorScheme = scheme,

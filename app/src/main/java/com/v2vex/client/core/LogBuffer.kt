@@ -31,29 +31,52 @@ data class LogEntry(
     val timestamp: String,
     val level: LogLevel,
     val source: String,
-    val message: String
+    val message: String,
+    val isSystem: Boolean
+)
+
+data class RecentConnection(
+    val id: Long,
+    val timestamp: String,
+    val network: String,
+    val destination: String,
+    val outbound: String
 )
 
 /**
- * Real-time diagnostic ring buffer (3000 entries) with:
- * - 100ms batched live UI emission
- * - Async rolling file persistence (filesDir/logs/v2vex_realtime.log)
- * - Global uncaught crash recorder (last_crash.log)
- * - Full structured Bug Report generator (sanitized)
+ * Dual-Channel Real-Time Diagnostic Logger (v3.0):
+ * - Pinned System Buffer (600 lines: APP, VPN, TUN, TELEM, NET, Core, SpeedLab, WARP, Sniper) -> NEVER evicted by engine flood!
+ * - Engine Stream Buffer (2,400 lines: Xray-core / Sing-box)
+ * - Live Connection Sniffer ring (120 recent domains/IPs for 1-Tap Firewall)
+ * - Native .txt file exporter (filesDir/logs/logV2Vex.txt) for FileProvider sharing & SAF saving
  */
 object LogBuffer {
-    private const val MAX_ENTRIES = 3000
+    private const val MAX_SYSTEM_ENTRIES = 600
+    private const val MAX_ENGINE_ENTRIES = 2400
+    private const val MAX_CONNECTIONS = 120
     private const val MAX_FILE_BYTES = 1_500_000L
 
+    private val ENGINE_SOURCES = setOf("Xray-core", "Sing-box", "Xray")
+
     private val lock = Any()
-    private val buffer = ArrayDeque<LogEntry>(MAX_ENTRIES)
+    private val systemBuffer = ArrayDeque<LogEntry>(MAX_SYSTEM_ENTRIES)
+    private val engineBuffer = ArrayDeque<LogEntry>(MAX_ENGINE_ENTRIES)
+    private val connectionBuffer = ArrayDeque<RecentConnection>(MAX_CONNECTIONS)
     private var nextId = 1L
+    private var nextConnId = 1L
+    private var lastSniffedDomain: String? = null
 
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
+    private val _recentConnections = MutableStateFlow<List<RecentConnection>>(emptyList())
+    val recentConnections: StateFlow<List<RecentConnection>> = _recentConnections.asStateFlow()
+
     private val flushScheduled = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var logDir: File? = null
 
     @Volatile
     private var logFile: File? = null
@@ -66,14 +89,17 @@ object LogBuffer {
             SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     }
 
+    private val sniffRegex = Regex("""sniffed domain:\s*([^\s\]]+)""")
+    private val detourRegex = Regex("""taking detour \[([^\]]+)\] for \[(tcp|udp):([^\]]+)\]""")
+
     fun init(context: Context) {
         val dir = File(context.filesDir, "logs").apply { mkdirs() }
         val rf = File(dir, "v2vex_realtime.log")
         val cf = File(dir, "last_crash.log")
+        logDir = dir
         logFile = rf
         crashFile = cf
 
-        // Load previous crash if any
         if (cf.exists() && cf.length() > 0L) {
             val prevCrash = runCatching { cf.readText().take(2500) }.getOrNull()
             if (!prevCrash.isNullOrBlank()) {
@@ -82,7 +108,6 @@ object LogBuffer {
             cf.delete()
         }
 
-        // Install global crash handler so fatal bugs are never lost
         val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching {
@@ -103,25 +128,60 @@ object LogBuffer {
 
     fun log(level: LogLevel, source: String, message: String) {
         val ts = timeFmt.get()?.format(Date()) ?: ""
-        val entry: LogEntry
+        val isSys = source !in ENGINE_SOURCES
         synchronized(lock) {
-            if (buffer.size >= MAX_ENTRIES) {
-                buffer.removeFirst()
-            }
-            entry = LogEntry(
+            val entry = LogEntry(
                 id = nextId++,
                 timestamp = ts,
                 level = level,
                 source = source,
-                message = message
+                message = message,
+                isSystem = isSys
             )
-            buffer.addLast(entry)
+            if (isSys) {
+                if (systemBuffer.size >= MAX_SYSTEM_ENTRIES) systemBuffer.removeFirst()
+                systemBuffer.addLast(entry)
+            } else {
+                if (engineBuffer.size >= MAX_ENGINE_ENTRIES) engineBuffer.removeFirst()
+                engineBuffer.addLast(entry)
+                extractLiveConnectionLocked(ts, message)
+            }
         }
         val formattedLine = "[$ts] [${level.tag}] [$source] $message\n"
-        scope.launch {
-            appendToDisk(formattedLine)
-        }
+        scope.launch { appendToDisk(formattedLine) }
         scheduleFlush()
+    }
+
+    private fun extractLiveConnectionLocked(ts: String, line: String) {
+        sniffRegex.find(line)?.let { m ->
+            lastSniffedDomain = m.groupValues[1]
+            return
+        }
+        detourRegex.find(line)?.let { m ->
+            val outbound = m.groupValues[1]
+            val net = m.groupValues[2].uppercase()
+            val rawDest = m.groupValues[3]
+            val hostOnly = rawDest.substringBeforeLast(":")
+            val displayDest = if (hostOnly.any { it.isLetter() }) {
+                rawDest
+            } else {
+                lastSniffedDomain?.let { "$it (${rawDest.substringAfterLast(":")})" } ?: rawDest
+            }
+            lastSniffedDomain = null
+            if (displayDest.startsWith("www.gstatic.com")) return
+            val existing = connectionBuffer.lastOrNull()
+            if (existing?.destination == displayDest && existing.outbound == outbound) return
+            if (connectionBuffer.size >= MAX_CONNECTIONS) connectionBuffer.removeFirst()
+            connectionBuffer.addLast(
+                RecentConnection(
+                    id = nextConnId++,
+                    timestamp = ts,
+                    network = net,
+                    destination = displayDest,
+                    outbound = outbound
+                )
+            )
+        }
     }
 
     private fun appendToDisk(line: String) {
@@ -138,10 +198,14 @@ object LogBuffer {
     private fun scheduleFlush() {
         if (flushScheduled.compareAndSet(false, true)) {
             scope.launch {
-                delay(100)
+                delay(120)
                 flushScheduled.set(false)
-                val snapshot = synchronized(lock) { buffer.toList() }
-                _logs.value = snapshot
+                val (mergedLogs, conns) = synchronized(lock) {
+                    val combined = (systemBuffer + engineBuffer).sortedBy { it.id }
+                    combined to connectionBuffer.toList().asReversed()
+                }
+                _logs.value = mergedLogs
+                _recentConnections.value = conns
             }
         }
     }
@@ -153,22 +217,22 @@ object LogBuffer {
 
     fun clear() {
         synchronized(lock) {
-            buffer.clear()
+            systemBuffer.clear()
+            engineBuffer.clear()
+            connectionBuffer.clear()
         }
         _logs.value = emptyList()
+        _recentConnections.value = emptyList()
         scope.launch { runCatching { logFile?.writeText("") } }
     }
 
-    fun dumpText(): String = synchronized(lock) { buffer.toList() }.joinToString("\n") {
-        "[${it.timestamp}] [${it.level.tag}] [${it.source}] ${it.message}"
-    }
-
-    /**
-     * Generates a complete, sanitized diagnostic report ready to paste for rapid bug analysis.
-     */
     fun buildFullBugReport(context: Context, extraHeader: String = ""): String {
+        val (sysSnap, engSnap) = synchronized(lock) {
+            systemBuffer.toList() to engineBuffer.toList()
+        }
         val sb = StringBuilder()
-        sb.appendLine("===== V2VEX REAL-TIME DIAGNOSTIC REPORT =====")
+        sb.appendLine("===== V2VEX v3.0 REAL-TIME DIAGNOSTIC REPORT (.TXT) =====")
+        sb.appendLine("Generated: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(Date())}")
         sb.appendLine("App: V2Vex ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         sb.appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         sb.appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
@@ -185,13 +249,32 @@ object LogBuffer {
         if (cfgFile.exists()) {
             sb.appendLine("\n--- config.json (secrets redacted) ---")
             val raw = runCatching { cfgFile.readText() }.getOrDefault("")
-            val redacted = raw
-                .replace(Regex(""""(id|password|secretKey|publicKey|preSharedKey)"\s*:\s*"[^"]+""""), """"$1": "<REDACTED>"""")
+            val redacted = raw.replace(
+                Regex(""""(id|password|secretKey|publicKey|preSharedKey|private_key)"\s*:\s*"[^"]+""""),
+                """"$1": "<REDACTED>""""
+            )
             sb.appendLine(redacted)
         }
-        sb.appendLine("\n--- REAL-TIME LOGS (${buffer.size} entries) ---")
-        sb.appendLine(dumpText())
+        sb.appendLine("\n--- PINNED SYSTEM & TELEMETRY LOGS (${sysSnap.size} entries — never evicted) ---")
+        sysSnap.forEach {
+            sb.appendLine("[${it.timestamp}] [${it.level.tag}] [${it.source}] ${it.message}")
+        }
+        sb.appendLine("\n--- ENGINE STREAM LOGS (${engSnap.size} entries) ---")
+        engSnap.forEach {
+            sb.appendLine("[${it.timestamp}] [${it.level.tag}] [${it.source}] ${it.message}")
+        }
         sb.appendLine("===== END REPORT =====")
         return sb.toString()
+    }
+
+    /**
+     * Writes the full diagnostic report to filesDir/logs/logV2Vex.txt and returns the File
+     * so Android FileProvider can share it as a real .txt file attachment.
+     */
+    fun exportTxtReportFile(context: Context, extraHeader: String = ""): File {
+        val dir = logDir ?: File(context.filesDir, "logs").apply { mkdirs() }
+        val outFile = File(dir, "logV2Vex.txt")
+        outFile.writeText(buildFullBugReport(context, extraHeader))
+        return outFile
     }
 }

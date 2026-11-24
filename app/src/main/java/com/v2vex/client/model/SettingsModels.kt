@@ -45,9 +45,9 @@ enum class SplitTunnelMode(val label: String) {
 
 @Serializable
 enum class ThemeMode(val label: String) {
-    CYBER_DARK("Cyber Dark"),
-    AMOLED_BLACK("AMOLED Pitch Black"),
-    LIGHT("Clean Light")
+    CYBER_DARK("Obsidian Two-Tone"),
+    AMOLED_BLACK("AMOLED Monochrome"),
+    LIGHT("Paper & Ink")
 }
 
 @Serializable
@@ -104,7 +104,7 @@ data class SpeedTestSettings(
 
 @Serializable
 enum class CoreEnginePreference(val label: String) {
-    AUTO("Auto (Smart Dual-Core)"),
+    AUTO("Auto (Dual-Core)"),
     XRAY("Xray-core"),
     SING_BOX("Sing-box")
 }
@@ -121,6 +121,10 @@ data class AppSettings(
     val allowLan: Boolean = false,
     val enableIpv6: Boolean = false,
     val vpnMtu: Int = 1500,
+
+    // Pro Network Stability (QUIC Guard + Carrier NAT64 IPv4/IPv6 Dial Strategy)
+    val blockQuic: Boolean = true,
+    val outboundDomainStrategy: String = "AsIs", // AsIs / UseIPv4 / UseIPv6
 
     // Multi-Hop Proxy Chain (optional secondary node ID)
     val chainProfileId: String? = null,

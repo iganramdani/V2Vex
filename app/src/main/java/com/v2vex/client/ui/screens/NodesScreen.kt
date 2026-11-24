@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,6 +38,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -45,25 +47,28 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.v2vex.client.core.BugHostProbeResult
+import com.v2vex.client.core.BugHostSniper
 import com.v2vex.client.core.SpeedMath
 import com.v2vex.client.core.UriParser
 import com.v2vex.client.model.AppSettings
 import com.v2vex.client.model.ProxyProtocol
 import com.v2vex.client.model.ServerProfile
 import com.v2vex.client.model.Subscription
-import com.v2vex.client.ui.theme.XrayAmber
+import com.v2vex.client.ui.components.QrCodeDialog
 import com.v2vex.client.ui.theme.XrayCoral
-import com.v2vex.client.ui.theme.XrayCyan
 import com.v2vex.client.ui.theme.XrayEmerald
-import java.util.UUID
+import kotlinx.coroutines.launch
 
 @Composable
 fun NodesScreen(
@@ -72,12 +77,14 @@ fun NodesScreen(
     selectedProfileId: String?,
     settings: AppSettings,
     isTestingBatch: Boolean,
+    isGeneratingWarp: Boolean,
     onSelectProfile: (String) -> Unit,
     onUpsertProfile: (ServerProfile) -> Unit,
     onDeleteProfile: (String) -> Unit,
     onImportRaw: (String) -> Int,
     onPingAll: () -> Unit,
     onSelectFastest: () -> Unit,
+    onGenerateWarp: () -> Unit,
     onAddSubscription: (name: String, url: String) -> Unit,
     onRefreshSubscription: (Subscription) -> Unit,
     onDeleteSubscription: (String) -> Unit,
@@ -90,26 +97,32 @@ fun NodesScreen(
     var qrProfile by remember { mutableStateOf<ServerProfile?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showSubDialog by remember { mutableStateOf(false) }
+    var showBugSniperDialog by remember { mutableStateOf(false) }
+
+    val selectedProfile = remember(profiles, selectedProfileId) {
+        profiles.firstOrNull { it.id == selectedProfileId } ?: profiles.firstOrNull()
+    }
 
     val filtered = remember(profiles, searchQuery, filterProtocol) {
         profiles.filter { p ->
             val matchProto = filterProtocol == null || p.protocol == filterProtocol
             val matchQuery = searchQuery.isBlank() ||
                 p.name.contains(searchQuery, ignoreCase = true) ||
-                p.address.contains(searchQuery, ignoreCase = true)
+                p.address.contains(searchQuery, ignoreCase = true) ||
+                p.sni.contains(searchQuery, ignoreCase = true)
             matchProto && matchQuery
         }
     }
 
     qrProfile?.let { prof ->
         val uri = remember(prof) { UriParser.exportUri(prof) }
-        com.v2vex.client.ui.components.QrCodeDialog(
+        QrCodeDialog(
             title = prof.name,
             payload = uri,
             onCopyUri = {
                 clipboard.setText(AnnotatedString(uri))
                 qrProfile = null
-                onShowMessage("Copied ${prof.protocol.label} URI to clipboard")
+                onShowMessage("Copied ${prof.protocol.label} URI")
             },
             onDismiss = { qrProfile = null }
         )
@@ -132,18 +145,18 @@ fun NodesScreen(
         var rawText by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showImportDialog = false },
-            title = { Text("Import URIs or Xray JSON") },
+            title = { Text("Universal Import") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Supports vless://, vmess://, trojan://, ss://, socks://, wireguard://, Base64 lists, or raw Xray JSON.",
+                        text = "Supports VLESS, VMess, Trojan, SS, Hysteria2, TUIC, WireGuard, Base64, Clash/Mihomo YAML, or Sing-box/Xray JSON.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     OutlinedTextField(
                         value = rawText,
                         onValueChange = { rawText = it },
-                        label = { Text("Paste URI(s) or JSON") },
+                        label = { Text("Paste URI(s), YAML, or JSON") },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(160.dp)
@@ -173,12 +186,36 @@ fun NodesScreen(
         )
     }
 
+    if (showBugSniperDialog) {
+        BugHostSniperDialog(
+            activeProfile = selectedProfile,
+            onDismiss = { showBugSniperDialog = false },
+            onApplyAsAddress = { bugHost ->
+                val target = selectedProfile ?: return@BugHostSniperDialog
+                onUpsertProfile(target.copy(address = bugHost))
+                showBugSniperDialog = false
+                onShowMessage("Applied '$bugHost' as CDN Front Address on '${target.name}'")
+            },
+            onApplyAsSni = { bugHost ->
+                val target = selectedProfile ?: return@BugHostSniperDialog
+                val pinCert = if (target.address.isNotBlank() && target.address != bugHost) target.address else target.verifyPeerCertByName
+                onUpsertProfile(target.copy(sni = bugHost, host = bugHost, verifyPeerCertByName = pinCert))
+                showBugSniperDialog = false
+                onShowMessage("Applied '$bugHost' as Safe Spoof SNI on '${target.name}'")
+            }
+        )
+    }
+
+    val primaryTone = MaterialTheme.colorScheme.primary
+    val signalTone = MaterialTheme.colorScheme.secondary
+    val outlineTone = MaterialTheme.colorScheme.outline
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
-        // Header Row
+        // Minimalist Header
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -191,20 +228,20 @@ fun NodesScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "${subscriptions.size} subscription(s) active",
+                    text = "${subscriptions.size} subscription(s) · Pro Tools",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Row {
                 IconButton(onClick = { showSubDialog = true }) {
-                    Icon(Icons.AutoMirrored.Rounded.List, contentDescription = "Subscriptions", tint = XrayCyan)
+                    Icon(Icons.AutoMirrored.Rounded.List, contentDescription = "Subscriptions")
                 }
                 IconButton(onClick = {
                     val clipText = clipboard.getText()?.text.orEmpty()
                     if (clipText.isNotBlank()) {
                         val count = onImportRaw(clipText)
-                        onShowMessage(if (count > 0) "Imported $count node(s) from clipboard" else "Clipboard has no valid proxy URI")
+                        onShowMessage(if (count > 0) "Imported $count node(s) from clipboard" else "Clipboard has no valid URI/YAML")
                     } else {
                         showImportDialog = true
                     }
@@ -212,82 +249,126 @@ fun NodesScreen(
                     Icon(Icons.Rounded.Create, contentDescription = "Paste Clipboard")
                 }
                 IconButton(onClick = { editingProfile = ServerProfile() }) {
-                    Icon(Icons.Rounded.Add, contentDescription = "Add Node", tint = XrayEmerald)
+                    Icon(Icons.Rounded.Add, contentDescription = "Create Node", tint = signalTone)
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Search Bar
         OutlinedTextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },
-            placeholder = { Text("Search nodes or hosts...") },
+            placeholder = { Text("Search nodes, hosts, or SNI...") },
             leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
             singleLine = true,
-            shape = RoundedCornerShape(14.dp),
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Action Bar: Batch Ping + Smart Fastest + Manual Import
+        // Action Bar Row 1: RTT Scan + Auto Fastest + Import
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Surface(
                 onClick = { if (!isTestingBatch) onPingAll() },
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, outlineTone),
                 modifier = Modifier.weight(1f)
             ) {
                 Row(
-                    modifier = Modifier.padding(vertical = 9.dp, horizontal = 10.dp),
+                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 8.dp),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (isTestingBatch) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp), tint = XrayCyan)
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
                     }
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Test All RTT", style = MaterialTheme.typography.labelMedium)
+                    Text("Scan RTT", style = MaterialTheme.typography.labelMedium)
                 }
             }
 
             Surface(
                 onClick = onSelectFastest,
-                shape = RoundedCornerShape(12.dp),
-                color = XrayEmerald.copy(alpha = 0.14f),
-                border = BorderStroke(1.dp, XrayEmerald.copy(alpha = 0.4f)),
+                shape = RoundedCornerShape(10.dp),
+                color = signalTone.copy(alpha = 0.10f),
+                border = BorderStroke(1.dp, signalTone.copy(alpha = 0.5f)),
                 modifier = Modifier.weight(1f)
             ) {
                 Row(
-                    modifier = Modifier.padding(vertical = 9.dp, horizontal = 10.dp),
+                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 8.dp),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Rounded.Star, contentDescription = null, modifier = Modifier.size(16.dp), tint = XrayEmerald)
+                    Icon(Icons.Rounded.Star, contentDescription = null, modifier = Modifier.size(14.dp), tint = signalTone)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Auto Fastest", style = MaterialTheme.typography.labelMedium, color = XrayEmerald)
+                    Text("Fastest", style = MaterialTheme.typography.labelMedium, color = signalTone)
                 }
             }
 
             Surface(
                 onClick = { showImportDialog = true },
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, outlineTone)
             ) {
-                Box(modifier = Modifier.padding(vertical = 9.dp, horizontal = 12.dp)) {
+                Box(modifier = Modifier.padding(vertical = 8.dp, horizontal = 12.dp)) {
                     Text("Import", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Action Bar Row 2 (v3.0 Pro Tools): BugHost Sniper + 1-Click Free Cloudflare WARP
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Surface(
+                onClick = { showBugSniperDialog = true },
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, outlineTone),
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp)
+                ) {
+                    Text("BugHost / CDN Sniper", style = MaterialTheme.typography.labelSmall, color = primaryTone)
+                }
+            }
+
+            Surface(
+                onClick = { if (!isGeneratingWarp) onGenerateWarp() },
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, outlineTone),
+                modifier = Modifier.weight(1f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isGeneratingWarp) {
+                        CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.8.dp)
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    Text("+ Free WARP Clean IP", style = MaterialTheme.typography.labelSmall, color = primaryTone)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         // Protocol Filter Chips
         Row(
@@ -310,7 +391,6 @@ fun NodesScreen(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Profile List
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 24.dp),
@@ -324,14 +404,6 @@ fun NodesScreen(
                     onSelect = { onSelectProfile(profile.id) },
                     onEdit = { editingProfile = profile },
                     onShare = { qrProfile = profile },
-                    onDuplicate = {
-                        onUpsertProfile(
-                            profile.copy(
-                                id = UUID.randomUUID().toString(),
-                                name = "${profile.name} (Copy)"
-                            )
-                        )
-                    },
                     onDelete = { onDeleteProfile(profile.id) }
                 )
             }
@@ -346,22 +418,23 @@ private fun NodeCard(
     onSelect: () -> Unit,
     onEdit: () -> Unit,
     onShare: () -> Unit,
-    onDuplicate: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val signalTone = MaterialTheme.colorScheme.secondary
+    val outlineTone = MaterialTheme.colorScheme.outline
     Card(
         onClick = onSelect,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (selected) {
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f)
+                MaterialTheme.colorScheme.surfaceVariant
             } else {
                 MaterialTheme.colorScheme.surface
             }
         ),
         border = BorderStroke(
             width = if (selected) 1.5.dp else 1.dp,
-            color = if (selected) XrayCyan else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+            color = if (selected) MaterialTheme.colorScheme.primary else outlineTone
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -387,39 +460,27 @@ private fun NodeCard(
                     )
                 }
 
-                // Telemetry Pills (Last Speed + Ping)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     profile.lastDownloadMbps?.let { mbps ->
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = XrayCyan.copy(alpha = 0.14f)
-                        ) {
-                            Text(
-                                text = String.format("%.1f Mbps", mbps),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = XrayCyan,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                            )
-                        }
+                        Text(
+                            text = String.format("%.1fM", mbps),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
                     }
                     profile.latencyMs?.let { ms ->
                         val color = when {
                             ms < 0 -> XrayCoral
-                            ms < 90 -> XrayEmerald
-                            ms < 220 -> XrayAmber
-                            else -> XrayCoral
+                            ms < 150 -> signalTone
+                            else -> MaterialTheme.colorScheme.onSurface
                         }
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = color.copy(alpha = 0.15f)
-                        ) {
-                            Text(
-                                text = if (ms < 0) "ERR" else "${ms}ms",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = color,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                            )
-                        }
+                        Text(
+                            text = if (ms < 0) "ERR" else "${ms}ms",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = color,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
                     }
                 }
             }
@@ -428,18 +489,131 @@ private fun NodeCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Rounded.Share, contentDescription = "Copy URI", modifier = Modifier.size(18.dp))
+                IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Rounded.Share, contentDescription = "QR / URI", modifier = Modifier.size(16.dp))
                 }
-                IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Rounded.Edit, contentDescription = "Edit", modifier = Modifier.size(18.dp))
+                IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Rounded.Edit, contentDescription = "Edit", modifier = Modifier.size(16.dp))
                 }
-                IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Rounded.Delete, contentDescription = "Delete", tint = XrayCoral, modifier = Modifier.size(18.dp))
+                IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Rounded.Delete, contentDescription = "Delete", tint = XrayCoral, modifier = Modifier.size(16.dp))
                 }
             }
         }
     }
+}
+
+@Composable
+private fun BugHostSniperDialog(
+    activeProfile: ServerProfile?,
+    onDismiss: () -> Unit,
+    onApplyAsAddress: (String) -> Unit,
+    onApplyAsSni: (String) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var rawHosts by remember {
+        mutableStateOf(BugHostSniper.DEFAULT_CANDIDATES.joinToString("\n"))
+    }
+    var scanning by remember { mutableStateOf(false) }
+    var results by remember { mutableStateOf<List<BugHostProbeResult>>(emptyList()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("BugHost / CDN Sniper Studio") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Probes TLS SNI handshake, RTT, HTTP code & CDN Server header, then 1-tap injects into '${activeProfile?.name ?: "selected node"}'.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = rawHosts,
+                    onValueChange = { rawHosts = it },
+                    label = { Text("Candidate Hosts / CDN IPs (1 per line)") },
+                    textStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(110.dp)
+                )
+                Button(
+                    enabled = !scanning,
+                    onClick = {
+                        scanning = true
+                        results = emptyList()
+                        scope.launch {
+                            results = BugHostSniper.scanBatch(rawHosts.lines())
+                            scanning = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (scanning) "Scanning TLS & CDN Headers..." else "Start Sniper Scan")
+                }
+
+                LazyColumn(
+                    modifier = Modifier.weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(results, key = { it.host }) { r ->
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = r.host,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = if (r.reachable) "${r.rttMs}ms" else "FAIL",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (r.reachable) XrayEmerald else XrayCoral
+                                    )
+                                }
+                                Text(
+                                    text = if (r.reachable) {
+                                        "HTTP ${r.httpCode} · ${r.serverHeader.ifBlank { "No-Server-Hdr" }} · ${r.tlsProtocol}"
+                                    } else {
+                                        r.error ?: "Unreachable"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (r.reachable && activeProfile != null) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        TextButton(onClick = { onApplyAsAddress(r.host) }) {
+                                            Text("Set CDN Address", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                        TextButton(onClick = { onApplyAsSni(r.host) }) {
+                                            Text("Set Safe SNI", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
 }
 
 @Composable
@@ -468,7 +642,7 @@ private fun SubscriptionsDialog(
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it.trim() },
-                    label = { Text("Subscription URL (https://...)") },
+                    label = { Text("URL (Base64 / Clash YAML / Sing-box JSON)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -481,12 +655,12 @@ private fun SubscriptionsDialog(
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Add & Sync Subscription")
+                    Text("Add & Sync")
                 }
 
                 subscriptions.forEach { sub ->
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(10.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -509,7 +683,7 @@ private fun SubscriptionsDialog(
                                 )
                             }
                             IconButton(onClick = { onRefresh(sub) }) {
-                                Icon(Icons.Rounded.Refresh, contentDescription = "Sync", tint = XrayCyan)
+                                Icon(Icons.Rounded.Refresh, contentDescription = "Sync")
                             }
                             IconButton(onClick = { onDelete(sub.id) }) {
                                 Icon(Icons.Rounded.Delete, contentDescription = "Delete", tint = XrayCoral)

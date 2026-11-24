@@ -15,14 +15,15 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.lifecycle.lifecycleScope
 import com.v2vex.client.core.UriParser
 import com.v2vex.client.model.VpnConnectionState
-import com.v2vex.client.service.VpnStateHolder
 import com.v2vex.client.service.V2VexVpnService
+import com.v2vex.client.service.VpnStateHolder
 import com.v2vex.client.ui.V2VexRoot
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private val coreRefreshNonce = mutableIntStateOf(0)
+    private val openLogsShortcutNonce = mutableIntStateOf(0)
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -70,13 +71,14 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        handleDeepLink(intent)
+        handleIncomingIntent(intent)
 
         val app = application as V2VexApp
         setContent {
             V2VexRoot(
                 app = app,
                 coreRefreshNonce = coreRefreshNonce.intValue,
+                openLogsShortcutNonce = openLogsShortcutNonce.intValue,
                 onRequestToggleVpn = { toggleVpn() },
                 onRequestImportLocalCore = { corePickerLauncher.launch(arrayOf("*/*")) }
             )
@@ -85,7 +87,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleDeepLink(intent)
+        handleIncomingIntent(intent)
     }
 
     private fun toggleVpn() {
@@ -102,7 +104,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleDeepLink(intent: Intent?) {
+    private fun handleIncomingIntent(intent: Intent?) {
+        when (intent?.action) {
+            "com.v2vex.client.SHORTCUT_TOGGLE_VPN" -> {
+                toggleVpn()
+                return
+            }
+            "com.v2vex.client.SHORTCUT_OPEN_LOGS" -> {
+                openLogsShortcutNonce.intValue++
+                return
+            }
+        }
         val data = intent?.dataString ?: return
         val parsed = UriParser.parseSingle(data) ?: return
         val app = application as V2VexApp

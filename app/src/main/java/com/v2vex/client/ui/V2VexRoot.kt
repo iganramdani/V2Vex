@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.v2vex.client.V2VexApp
 import com.v2vex.client.model.VpnConnectionState
@@ -39,10 +40,9 @@ import com.v2vex.client.ui.screens.NodesScreen
 import com.v2vex.client.ui.screens.SettingsScreen
 import com.v2vex.client.ui.screens.SpeedLabScreen
 import com.v2vex.client.ui.theme.V2VexTheme
-import com.v2vex.client.ui.theme.XrayCyan
 
 enum class RootTab(val label: String, val icon: ImageVector) {
-    DASHBOARD("Dashboard", Icons.Rounded.Home),
+    DASHBOARD("Tunnel", Icons.Rounded.Home),
     NODES("Nodes", Icons.AutoMirrored.Rounded.List),
     SPEEDLAB("SpeedLab", Icons.Rounded.PlayArrow),
     SETTINGS("Core", Icons.Rounded.Settings)
@@ -52,6 +52,7 @@ enum class RootTab(val label: String, val icon: ImageVector) {
 fun V2VexRoot(
     app: V2VexApp,
     coreRefreshNonce: Int,
+    openLogsShortcutNonce: Int,
     onRequestToggleVpn: () -> Unit,
     onRequestImportLocalCore: () -> Unit,
     vm: V2VexViewModel = viewModel()
@@ -69,6 +70,7 @@ fun V2VexRoot(
     val coreUpdateStatus by vm.coreUpdateStatus.collectAsState()
     val appUpdateRelease by vm.appUpdateRelease.collectAsState()
     val isTestingBatch by vm.isTestingBatch.collectAsState()
+    val isGeneratingWarp by vm.isGeneratingWarp.collectAsState()
     val speedProgress by vm.speedProgress.collectAsState()
 
     val selectedProfile = remember(profiles, selectedProfileId) {
@@ -83,6 +85,10 @@ fun V2VexRoot(
         vm.refreshCoreInfo()
     }
 
+    LaunchedEffect(openLogsShortcutNonce) {
+        if (openLogsShortcutNonce > 0) showLogs = true
+    }
+
     LaunchedEffect(Unit) {
         vm.messages.collect { msg ->
             snackbarHost.showSnackbar(msg)
@@ -90,12 +96,16 @@ fun V2VexRoot(
     }
 
     V2VexTheme(themeMode = settings.themeMode) {
+        val primaryTone = MaterialTheme.colorScheme.primary
         Scaffold(
             snackbarHost = { SnackbarHost(snackbarHost) },
             containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
                 if (!showLogs) {
-                    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 0.dp
+                    ) {
                         RootTab.entries.forEach { tab ->
                             val selected = currentTab == tab
                             NavigationBarItem(
@@ -104,9 +114,11 @@ fun V2VexRoot(
                                 icon = { Icon(tab.icon, contentDescription = tab.label) },
                                 label = { Text(tab.label) },
                                 colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = XrayCyan,
-                                    selectedTextColor = XrayCyan,
-                                    indicatorColor = XrayCyan.copy(alpha = 0.14f)
+                                    selectedIconColor = primaryTone,
+                                    selectedTextColor = primaryTone,
+                                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    indicatorColor = MaterialTheme.colorScheme.surfaceVariant
                                 )
                             )
                         }
@@ -131,6 +143,7 @@ fun V2VexRoot(
                             vm.updateSettings(hotReloadVpn = true) { it.copy(logLevel = lvl) }
                             vm.emitMessage("Xray log level -> $lvl")
                         },
+                        onQuickDomainRule = { domain, target -> vm.addQuickDomainRule(domain, target) },
                         onBack = { showLogs = false },
                         onMessage = { vm.emitMessage(it) }
                     )
@@ -147,6 +160,7 @@ fun V2VexRoot(
                             onOpenCoreSettings = { currentTab = RootTab.SETTINGS },
                             onOpenLogs = { showLogs = true },
                             onPingSelected = { vm.pingSelected() },
+                            onToggleBlockQuic = { vm.toggleBlockQuic() },
                             onToggleFragment = { vm.toggleFragment() },
                             onToggleMux = { vm.toggleMux() },
                             onCycleRouting = { vm.cycleRouting() }
@@ -158,12 +172,14 @@ fun V2VexRoot(
                             selectedProfileId = selectedProfile?.id,
                             settings = settings,
                             isTestingBatch = isTestingBatch,
+                            isGeneratingWarp = isGeneratingWarp,
                             onSelectProfile = { vm.selectProfile(it) },
                             onUpsertProfile = { vm.upsertProfile(it) },
                             onDeleteProfile = { vm.deleteProfile(it) },
                             onImportRaw = { vm.importRaw(it) },
                             onPingAll = { vm.pingAll() },
                             onSelectFastest = { vm.selectFastest() },
+                            onGenerateWarp = { vm.generateFreeWarp() },
                             onAddSubscription = { n, u -> vm.addSubscription(n, u) },
                             onRefreshSubscription = { vm.refreshSubscription(it) },
                             onDeleteSubscription = { vm.deleteSubscription(it) },

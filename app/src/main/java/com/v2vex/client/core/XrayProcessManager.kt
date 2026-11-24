@@ -10,11 +10,10 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * Manages the Xray-core child process with:
- * - Startup health probe (never reports fake ACTIVE on immediate crash)
- * - Live stdout/stderr streaming to batched LogBuffer
- * - Exit watchdog callback
- * - Zombie-proof SIGTERM -> SIGKILL shutdown
+ * Manages Xray-core / Sing-box child process with:
+ * - Accurate Xray severity classification (respects [Error]/[Warning]/[Info]/[Debug] tags)
+ * - Startup health probe & crash watchdog
+ * - Zombie-proof SIGTERM -> SIGKILL cleanup
  */
 class XrayProcessManager(
     private val context: Context,
@@ -45,10 +44,7 @@ class XrayProcessManager(
         }
         val engineName = if (useSingBox) "Sing-box" else "Xray-core"
         if (binary == null || !binary.canExecute()) {
-            LogBuffer.e(
-                "Core",
-                "No executable $engineName binary found ($source). Cannot start tunnel."
-            )
+            LogBuffer.e("Core", "No executable $engineName binary found ($source). Cannot start tunnel.")
             return false to "No executable $engineName ($source)"
         }
 
@@ -60,50 +56,53 @@ class XrayProcessManager(
 
             val proc = pb.start()
             process = proc
-            LogBuffer.i(engineName, "Launching $engineName from $source (${binary.name})")
+            LogBuffer.i("Core", "Launched $engineName from $source (${binary.name})")
 
             logJob = scope.launch(Dispatchers.IO) {
                 runCatching {
                     proc.inputStream.bufferedReader().forEachLine { line ->
-                        val lvl = when {
-                            line.contains("[Error]", ignoreCase = true) ||
-                                line.contains("FATAL", ignoreCase = true) ||
-                                line.contains("failed", ignoreCase = true) -> LogLevel.ERROR
-                            line.contains("[Warning]", ignoreCase = true) ||
-                                line.contains("WARN", ignoreCase = true) -> LogLevel.WARN
-                            line.contains("[Debug]", ignoreCase = true) -> LogLevel.DEBUG
-                            else -> LogLevel.INFO
-                        }
+                        val lvl = parseEngineLogLevel(line)
                         LogBuffer.log(lvl, engineName, line)
                     }
                 }
             }
 
-            // Health probe: wait 350ms to ensure core didn't crash immediately on config/port error
             delay(350)
             val exitedEarly = runCatching { proc.exitValue(); true }.getOrDefault(false)
             if (exitedEarly) {
                 val code = runCatching { proc.exitValue() }.getOrDefault(-1)
-                LogBuffer.e(engineName, "$engineName exited immediately (code $code). Check Live Logs.")
+                LogBuffer.e("Core", "$engineName exited immediately (code $code). Open Live Log (.txt) for details.")
                 stop()
                 return false to "$engineName exited (code $code)"
             }
 
-            // Watchdog: notify VPN service if core crashes later
             watchdogJob = scope.launch(Dispatchers.IO) {
                 val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
                 if (process === proc) {
-                    LogBuffer.e(engineName, "$engineName terminated unexpectedly (exit code $exitCode)")
+                    LogBuffer.e("Core", "$engineName terminated unexpectedly (exit code $exitCode)")
                     onUnexpectedExit(exitCode)
                 }
             }
 
             true to "$engineName ($source)"
         } catch (t: Throwable) {
-            LogBuffer.e(engineName, "Failed to launch $engineName: ${t.message}")
+            LogBuffer.e("Core", "Failed to launch $engineName: ${t.message}")
             stop()
             false to "$engineName launch error: ${t.message}"
         }
+    }
+
+    /**
+     * Strictly respects Xray/Sing-box bracket severity tags first so normal [Info] UDP pipe
+     * closures are never misclassified as [ERR].
+     */
+    private fun parseEngineLogLevel(line: String): LogLevel = when {
+        line.contains("[Error]") || line.contains("FATAL") || line.contains("panic:") -> LogLevel.ERROR
+        line.contains("[Warning]") || line.contains("WARN[") -> LogLevel.WARN
+        line.contains("[Debug]") || line.contains("DEBUG[") -> LogLevel.DEBUG
+        line.contains("[Info]") || line.contains("INFO[") -> LogLevel.INFO
+        line.contains("error", ignoreCase = true) -> LogLevel.ERROR
+        else -> LogLevel.INFO
     }
 
     fun stop() {

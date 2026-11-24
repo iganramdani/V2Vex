@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">V2Vex</string>
-    <string name="app_tagline">99% Fast &amp; Light Xray Engine</string>
-    <string name="vpn_channel_name">V2Vex Tunnel Status</string>
-    <string name="vpn_channel_desc">Persistent status and live Mbps telemetry while VPN tunnel is active</string>
+    <string name="app_tagline">99% Fast &amp; Light · Two-Tone Minimalist</string>
+    <string name="vpn_channel_name">V2Vex Tunnel Telemetry</string>
+    <string name="vpn_channel_desc">Live L3 TUN throughput and connection status</string>
+    <string name="shortcut_toggle_vpn">Toggle Tunnel</string>
+    <string name="shortcut_open_logs">Live Log (.txt)</string>
 </resources>

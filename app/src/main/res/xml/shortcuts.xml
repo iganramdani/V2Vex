@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="toggle_vpn"
+        android:enabled="true"
+        android:icon="@drawable/ic_vpn_tile"
+        android:shortcutShortLabel="@string/shortcut_toggle_vpn"
+        android:shortcutLongLabel="@string/shortcut_toggle_vpn">
+        <intent
+            android:action="com.v2vex.client.SHORTCUT_TOGGLE_VPN"
+            android:targetPackage="com.v2vex.client"
+            android:targetClass="com.v2vex.client.MainActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="open_logs"
+        android:enabled="true"
+        android:icon="@drawable/ic_vpn_tile"
+        android:shortcutShortLabel="@string/shortcut_open_logs"
+        android:shortcutLongLabel="@string/shortcut_open_logs">
+        <intent
+            android:action="com.v2vex.client.SHORTCUT_OPEN_LOGS"
+            android:targetPackage="com.v2vex.client"
+            android:targetClass="com.v2vex.client.MainActivity" />
+    </shortcut>
+</shortcuts>
