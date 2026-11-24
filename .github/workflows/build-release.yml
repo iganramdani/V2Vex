@@ -1,4 +1,4 @@
-name: Build V2Vex APK
+name: Build & Release V2Vex APK
 
 on:
   push:
@@ -6,17 +6,26 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
 
       - name: Bundle Latest Xray-core & GeoData
         run: |
@@ -27,8 +36,60 @@ jobs:
         run: |
           gradle testDebugUnitTest assembleRelease --no-daemon
 
-      - name: Upload Release APK Artifact
+      - name: Align & Sign Release APK
+        run: |
+          BUILD_TOOLS="$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -n 1)"
+          keytool -genkeypair -v \
+            -keystore v2vex-ci.jks -alias v2vex \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass v2vex99release -keypass v2vex99release \
+            -dname "CN=V2Vex, OU=Engineering, O=V2Vex, L=Global, S=Global, C=ID"
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            TAG_NAME="v1.0.0-ci"
+          fi
+          APK_NAME="V2Vex-${TAG_NAME}-arm64-v8a-release.apk"
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            aligned.apk
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks v2vex-ci.jks \
+            --ks-key-alias v2vex \
+            --ks-pass pass:v2vex99release \
+            --key-pass pass:v2vex99release \
+            --out "$APK_NAME" \
+            aligned.apk
+
+          "$BUILD_TOOLS/apksigner" verify "$APK_NAME"
+          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
+          echo "CORE_VER=$(cat app/src/main/assets/core_version.txt || echo latest)" >> "$GITHUB_ENV"
+
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: V2Vex-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: V2Vex-APK
+          path: ${{ env.APK_NAME }}
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" "${APK_NAME}" \
+            --title "V2Vex ${GITHUB_REF_NAME} — 99% Fast & Light" \
+            --notes "## V2Vex ${GITHUB_REF_NAME}
+
+          **Philosophy: 99% Fast & Light** — Ultra-lean Android V2Ray/Xray client built with pure Kotlin + Jetpack Compose Material 3.
+
+          ### Included in this APK
+          - **App Engine**: R8-shrunk V2Vex client (~1.3 MB app footprint)
+          - **Bundled Core**: Official **XTLS/Xray-core \`${CORE_VER}\`** (\`arm64-v8a\`) + \`geoip.dat\` & \`geosite.dat\` ready out of the box (and 1-tap hot-updatable in **Core & Settings**)
+
+          ### Highlights
+          - **Protocols**: VLESS (XTLS-Vision, REALITY), VMess, Trojan, Shadowsocks, SOCKS5, HTTP, WireGuard, Raw Xray JSON
+          - **Transports**: TCP, WebSocket, gRPC, HTTPUpgrade, XHTTP / SplitHTTP, HTTP/2, mKCP
+          - **SpeedLab**: High-accuracy multi-stream Mbps benchmark (monotonic nanosecond clock, warm-up discard, trimmed-mean sustained Mbps, RFC 3550 jitter, stability %)
+          - **Power Controls**: TLS Fragmentation (DPI Bypass), Mux.Cool, Traffic Sniffing, DoH/DoT/FakeDNS, Custom Routing Rules, Per-App Split Tunneling, Subscriptions, Auto-Fastest Node, Quick Settings Tile, Live Logs, and Full JSON Backup/Restore"
