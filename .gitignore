@@ -12,3 +12,7 @@ app/build/
 *.keystore
 *.apk
 *.aab
+app/src/main/jniLibs/
+app/src/main/assets/*.dat
+app/src/main/assets/core_version.txt
+release-out/

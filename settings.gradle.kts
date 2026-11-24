@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "XRay99"
+rootProject.name = "V2Vex"
 include(":app")

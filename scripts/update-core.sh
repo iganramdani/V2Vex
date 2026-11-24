@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# XRay99 — 1-Command Bundled Xray-core & GeoData Updater
+# V2Vex — 1-Command Bundled Xray-core & GeoData Updater
 # Downloads the latest official XTLS/Xray-core Android binaries into app/src/main/jniLibs/<abi>/libxray.so
 # so Android 10–15 devices can execute Xray-core directly from nativeLibraryDir (W^X compliant).
 set -euo pipefail

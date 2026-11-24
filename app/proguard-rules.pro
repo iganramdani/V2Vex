@@ -1,4 +1,4 @@
-# XRay99 R8/ProGuard rules — "99% Fast & Light"
+# V2Vex R8/ProGuard rules — "99% Fast & Light"
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.AnnotationsKt
 
@@ -9,11 +9,11 @@
 -keepclasseswithmembers class kotlinx.serialization.json.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep,includedescriptorclasses class com.xray99.client.model.**$$serializer { *; }
--keepclassmembers class com.xray99.client.model.** {
+-keep,includedescriptorclasses class com.v2vex.client.model.**$$serializer { *; }
+-keepclassmembers class com.v2vex.client.model.** {
     *** Companion;
 }
--keepclasseswithmembers class com.xray99.client.model.** {
+-keepclasseswithmembers class com.v2vex.client.model.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
 

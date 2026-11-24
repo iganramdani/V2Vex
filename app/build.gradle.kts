@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "com.xray99.client"
+    namespace = "com.v2vex.client"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.xray99.client"
+        applicationId = "com.v2vex.client"
         minSdk = 24
         targetSdk = 35
         versionCode = 1

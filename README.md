@@ -1,6 +1,6 @@
-# XRay99 — 99% Fast & Light Android V2Ray / Xray Client
+# V2Vex — 99% Fast & Light Android V2Ray / Xray Client
 
-**XRay99** is a next-generation, ultra-lightweight Android V2Ray/Xray client engineered around the **"99% Fast & Light"** philosophy: zero dependency bloat, hot-swappable Xray-core updates, high-accuracy multi-stream Mbps benchmarking, deep power-user flexibility, and an interactive Material 3 interface.
+**V2Vex** is a next-generation, ultra-lightweight Android V2Ray/Xray client engineered around the **"99% Fast & Light"** philosophy: zero dependency bloat, hot-swappable Xray-core updates, high-accuracy multi-stream Mbps benchmarking, deep power-user flexibility, and an interactive Material 3 interface.
 
 ## Core Philosophy & Highlights
 
