@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">XRay99</string>
+    <string name="app_tagline">99% Fast &amp; Light Xray Engine</string>
+    <string name="vpn_channel_name">XRay99 Tunnel Status</string>
+    <string name="vpn_channel_desc">Persistent status and live Mbps telemetry while VPN tunnel is active</string>
+</resources>
