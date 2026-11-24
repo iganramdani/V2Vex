@@ -121,13 +121,21 @@ class CoreManager(private val context: Context) {
         return null to "Sing-box Plugin Not Installed"
     }
 
+    fun availableGeoSiteTags(): List<String> = GeoDataInspector.loadGeoSiteTags(geoSiteFile)
+    fun availableGeoIpTags(): List<String> = GeoDataInspector.loadGeoIpTags(geoIpFile)
+
     suspend fun inspectInstalledCore(): CoreInfo = withContext(Dispatchers.IO) {
         val (bin, source) = resolveExecutableBinary()
         val executable = bin != null && canExecute(bin)
-        val probedVersion = if (executable && bin != null) probeVersionOutput(bin) else null
+        val probedVersion = if (executable) probeVersionOutput(bin) else null
+
+        val (sbBin, sbSource) = resolveSingBoxBinary()
+        val sbExecutable = sbBin != null && canExecute(sbBin)
+        val sbProbedVersion = if (sbExecutable) probeVersionOutput(sbBin) else null
 
         val savedVer = if (versionMetaFile.exists()) versionMetaFile.readText().trim() else ""
         val displayVer = probedVersion ?: savedVer.ifBlank { "Not Installed" }
+        val sbDisplayVer = sbProbedVersion ?: if (sbExecutable) "Sing-box Ready" else "Not Installed"
         val geoVer = if (geoMetaFile.exists()) geoMetaFile.readText().trim() else {
             if (hasGeoIp() || hasGeoSite()) "Local" else "Not Installed"
         }
@@ -138,6 +146,9 @@ class CoreManager(private val context: Context) {
             binaryPath = bin?.absolutePath ?: "",
             abi = primaryAbi(),
             executable = executable,
+            singBoxVersion = sbDisplayVer,
+            singBoxSource = sbSource,
+            singBoxExecutable = sbExecutable,
             geoIpVersion = if (hasGeoIp()) geoVer else "Not Installed",
             geoSiteVersion = if (hasGeoSite()) geoVer else "Not Installed",
             geoIpSizeBytes = if (geoIpFile.exists()) geoIpFile.length() else 0L,

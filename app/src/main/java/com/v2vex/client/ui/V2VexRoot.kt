@@ -72,6 +72,8 @@ fun V2VexRoot(
     val isTestingBatch by vm.isTestingBatch.collectAsState()
     val isGeneratingWarp by vm.isGeneratingWarp.collectAsState()
     val speedProgress by vm.speedProgress.collectAsState()
+    val geoSiteTags by vm.geoSiteTags.collectAsState()
+    val geoIpTags by vm.geoIpTags.collectAsState()
 
     val selectedProfile = remember(profiles, selectedProfileId) {
         profiles.firstOrNull { it.id == selectedProfileId } ?: profiles.firstOrNull()
@@ -133,15 +135,16 @@ fun V2VexRoot(
             ) {
                 if (showLogs) {
                     val header = "VPN State: ${vpnSnapshot.state} (${vpnSnapshot.coreMode})\n" +
-                        "Core: ${coreInfo.installedVersion} | src=${coreInfo.binarySource} | exec=${coreInfo.executable}\n" +
-                        "GeoIP=${coreInfo.geoIpSizeBytes}B | GeoSite=${coreInfo.geoSiteSizeBytes}B\n" +
+                        "Xray: ${coreInfo.installedVersion} | src=${coreInfo.binarySource} | exec=${coreInfo.executable}\n" +
+                        "Sing-box: ${coreInfo.singBoxVersion} | src=${coreInfo.singBoxSource} | exec=${coreInfo.singBoxExecutable}\n" +
+                        "GeoIP=${coreInfo.geoIpSizeBytes}B (${geoIpTags.size} tags) | GeoSite=${coreInfo.geoSiteSizeBytes}B (${geoSiteTags.size} tags)\n" +
                         "Active Node: ${selectedProfile?.name ?: "None"} (${selectedProfile?.shortBadge() ?: ""})"
                     LogsScreen(
                         xrayLogLevel = settings.logLevel,
                         extraReportHeader = header,
                         onChangeXrayLogLevel = { lvl ->
                             vm.updateSettings(hotReloadVpn = true) { it.copy(logLevel = lvl) }
-                            vm.emitMessage("Xray log level -> $lvl")
+                            vm.emitMessage("Core log level -> $lvl")
                         },
                         onQuickDomainRule = { domain, target -> vm.addQuickDomainRule(domain, target) },
                         onBack = { showLogs = false },
@@ -204,6 +207,8 @@ fun V2VexRoot(
                             settings = settings,
                             profiles = profiles,
                             coreInfo = coreInfo,
+                            geoSiteTags = geoSiteTags,
+                            geoIpTags = geoIpTags,
                             coreUpdateBusy = coreUpdateBusy,
                             coreUpdateProgress = coreUpdateProgress,
                             coreUpdateStatus = coreUpdateStatus,

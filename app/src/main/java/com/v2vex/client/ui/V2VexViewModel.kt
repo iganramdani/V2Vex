@@ -65,10 +65,17 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
     private val _speedProgress = MutableStateFlow(SpeedTestProgress())
     val speedProgress: StateFlow<SpeedTestProgress> = _speedProgress.asStateFlow()
 
+    private val _geoSiteTags = MutableStateFlow<List<String>>(emptyList())
+    val geoSiteTags: StateFlow<List<String>> = _geoSiteTags.asStateFlow()
+
+    private val _geoIpTags = MutableStateFlow<List<String>>(emptyList())
+    val geoIpTags: StateFlow<List<String>> = _geoIpTags.asStateFlow()
+
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
 
     private var speedJob: Job? = null
+    private var settingsReloadJob: Job? = null
 
     init {
         refreshCoreInfo()
@@ -81,6 +88,11 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshCoreInfo() {
         viewModelScope.launch {
             _coreInfo.value = app.coreManager.inspectInstalledCore()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                app.coreManager.ensureBundledGeoAssets()
+                _geoSiteTags.value = app.coreManager.availableGeoSiteTags()
+                _geoIpTags.value = app.coreManager.availableGeoIpTags()
+            }
         }
     }
 
@@ -108,10 +120,27 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateSettings(hotReloadVpn: Boolean = false, transform: (AppSettings) -> AppSettings) {
+        val before = app.repository.settings.value
         app.repository.updateSettings(transform)
-        if (hotReloadVpn) {
-            V2VexVpnService.reloadIfRunning(app)
+        val after = app.repository.settings.value
+        if (hotReloadVpn && tunnelSettingsChanged(before, after)) {
+            settingsReloadJob?.cancel()
+            settingsReloadJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(450)
+                V2VexVpnService.reloadIfRunning(app)
+            }
         }
+    }
+
+    private fun tunnelSettingsChanged(a: AppSettings, b: AppSettings): Boolean {
+        val aNorm = a.copy(
+            themeMode = b.themeMode,
+            speedUnit = b.speedUnit,
+            speedTest = b.speedTest,
+            customCoreRepo = b.customCoreRepo,
+            customGeoRepo = b.customGeoRepo
+        )
+        return aNorm != b
     }
 
     fun toggleBlockQuic() {
@@ -338,7 +367,11 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
             }.fold(
                 onSuccess = { info ->
                     _coreInfo.value = info
-                    emitMessage("GeoIP & GeoSite verified & updated")
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        _geoSiteTags.value = app.coreManager.availableGeoSiteTags()
+                        _geoIpTags.value = app.coreManager.availableGeoIpTags()
+                    }
+                    emitMessage("GeoIP & GeoSite verified & updated (${_geoSiteTags.value.size} geosite tags)")
                 },
                 onFailure = { err ->
                     _coreUpdateStatus.value = "Geo update failed: ${err.message}"

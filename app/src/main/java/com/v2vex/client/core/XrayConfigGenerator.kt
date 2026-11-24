@@ -37,7 +37,9 @@ object XrayConfigGenerator {
         hasGeoIp: Boolean = true,
         hasGeoSite: Boolean = true,
         chainProfile: ServerProfile? = null,
-        failoverProfiles: List<ServerProfile> = emptyList()
+        failoverProfiles: List<ServerProfile> = emptyList(),
+        validGeoIpTags: Set<String> = emptySet(),
+        validGeoSiteTags: Set<String> = emptySet()
     ): String {
         if (profile.protocol == ProxyProtocol.RAW_JSON && profile.rawJson.isNotBlank()) {
             return profile.rawJson
@@ -106,8 +108,18 @@ object XrayConfigGenerator {
             // Outbounds: Primary Proxy + Failover nodes + optional Chain Hop + Fragment + Direct + Block
             put("outbounds", buildOutbounds(profile, settings, chainProfile, activeFailovers))
 
-            // Routing Engine (with optional leastPing balancer + safe GeoData fallbacks)
-            put("routing", buildRouting(settings, hasGeoIp, hasGeoSite, activeFailovers.isNotEmpty()))
+            // Routing Engine (with optional leastPing balancer + safe GeoData fallbacks & validation)
+            put(
+                "routing",
+                buildRouting(
+                    settings = settings,
+                    hasGeoIp = hasGeoIp,
+                    hasGeoSite = hasGeoSite,
+                    enableBalancer = activeFailovers.isNotEmpty(),
+                    validGeoIpTags = validGeoIpTags,
+                    validGeoSiteTags = validGeoSiteTags
+                )
+            )
         }
 
         return prettyJson.encodeToString(JsonObject.serializer(), root)
@@ -274,14 +286,27 @@ object XrayConfigGenerator {
         })
     }
 
+    private val rangeRegex = Regex("""^\d+(-\d+)?$""")
+
+    private fun sanitizeRange(raw: String, fallback: String): String {
+        val t = raw.trim()
+        return if (rangeRegex.matches(t)) t else fallback
+    }
+
     private fun buildFragmentOutbound(settings: AppSettings): JsonObject = buildJsonObject {
+        val packetsRaw = settings.fragment.packets.trim()
+        val safePackets = if (packetsRaw.equals("tlshello", ignoreCase = true) || rangeRegex.matches(packetsRaw)) {
+            packetsRaw.lowercase()
+        } else {
+            "tlshello"
+        }
         put("tag", "fragment")
         put("protocol", "freedom")
         putJsonObject("settings") {
             putJsonObject("fragment") {
-                put("packets", settings.fragment.packets.ifBlank { "tlshello" })
-                put("length", settings.fragment.length.ifBlank { "10-20" })
-                put("interval", settings.fragment.interval.ifBlank { "10-20" })
+                put("packets", safePackets)
+                put("length", sanitizeRange(settings.fragment.length, "10-20"))
+                put("interval", sanitizeRange(settings.fragment.interval, "10-20"))
             }
         }
         putJsonObject("streamSettings") {
@@ -562,7 +587,9 @@ object XrayConfigGenerator {
         settings: AppSettings,
         hasGeoIp: Boolean,
         hasGeoSite: Boolean,
-        enableBalancer: Boolean = false
+        enableBalancer: Boolean = false,
+        validGeoIpTags: Set<String> = emptySet(),
+        validGeoSiteTags: Set<String> = emptySet()
     ): JsonObject = buildJsonObject {
         put("domainStrategy", settings.domainStrategy)
         if (enableBalancer) {
@@ -604,13 +631,55 @@ object XrayConfigGenerator {
                 })
             }
 
-            // User-defined custom rules
+            // User-defined custom rules (validated against real geosite.dat & geoip.dat tags!)
             settings.customRules.filter { it.enabled && it.values.isNotBlank() }.forEach { rule ->
-                val items = rule.values.split(",").map { it.trim() }.filter { item ->
-                    if (item.isEmpty()) false
-                    else if (item.startsWith("geoip:") && !hasGeoIp) false
-                    else if (item.startsWith("geosite:") && !hasGeoSite) false
-                    else true
+                val rawItems = rule.values.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                val items = rawItems.mapNotNull { item ->
+                    when (rule.matchType) {
+                        RuleMatchType.DOMAIN -> {
+                            val lower = item.lowercase()
+                            when {
+                                lower.startsWith("geoip:") -> null // wrong matchType, skip safely
+                                lower.startsWith("geosite:") -> {
+                                    if (!hasGeoSite) null
+                                    else {
+                                        val tagName = lower.removePrefix("geosite:").substringBefore("@").trim()
+                                        if (tagName.isEmpty()) null
+                                        else if (validGeoSiteTags.isNotEmpty() && tagName !in validGeoSiteTags) {
+                                            LogBuffer.w("Routing", "Skipped unknown geosite tag '$lower' (not in geosite.dat)")
+                                            null
+                                        } else lower
+                                    }
+                                }
+                                else -> item
+                            }
+                        }
+                        RuleMatchType.IP -> {
+                            val lower = item.lowercase()
+                            when {
+                                lower.startsWith("geosite:") -> null // wrong matchType, skip safely
+                                lower.startsWith("geoip:") -> {
+                                    if (!hasGeoIp) null
+                                    else {
+                                        val tagName = lower.removePrefix("geoip:").trim()
+                                        if (tagName.isEmpty()) null
+                                        else if (validGeoIpTags.isNotEmpty() && tagName !in validGeoIpTags) {
+                                            LogBuffer.w("Routing", "Skipped unknown geoip tag '$lower' (not in geoip.dat)")
+                                            null
+                                        } else lower
+                                    }
+                                }
+                                else -> item
+                            }
+                        }
+                        RuleMatchType.PORT -> {
+                            if (rangeRegex.matches(item)) item else null
+                        }
+                        RuleMatchType.PROTOCOL -> {
+                            val lower = item.lowercase()
+                            if (lower in setOf("http", "tls", "bittorrent", "quic")) lower else null
+                        }
+                    }
                 }
                 if (items.isNotEmpty()) {
                     add(buildJsonObject {

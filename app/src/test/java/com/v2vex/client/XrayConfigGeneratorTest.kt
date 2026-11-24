@@ -132,4 +132,60 @@ class XrayConfigGeneratorTest {
         assertTrue(kp.privateKeyBase64.length >= 43)
         assertTrue(kp.publicKeyBase64.length >= 43)
     }
+
+    @Test
+    fun skipsInvalidGeoSiteTagsAndSanitizesHalfTypedFragment() {
+        val profile = ServerProfile(
+            name = "Node",
+            protocol = ProxyProtocol.VLESS,
+            address = "vps.example.id",
+            port = 443,
+            uuidOrPassword = "11111111-2222-3333-4444-555555555555"
+        )
+        val settings = AppSettings(
+            fragment = FragmentConfig(enabled = true, packets = "badval", length = "10-", interval = "abc"),
+            customRules = listOf(
+                CustomRoutingRule(
+                    name = "Mixed",
+                    matchType = RuleMatchType.DOMAIN,
+                    values = "geosite:youtube, geosite:does-not-exist, geoip:id",
+                    target = RuleTarget.PROXY
+                )
+            )
+        )
+        val generated = XrayConfigGenerator.generate(
+            profile = profile,
+            settings = settings,
+            validGeoSiteTags = setOf("youtube", "category-ads-all")
+        )
+        assertTrue(XrayConfigGenerator.validateJson(generated).isSuccess)
+        assertTrue(generated.contains("geosite:youtube"))
+        assertFalse(generated.contains("geosite:does-not-exist"))
+        assertTrue(generated.contains("\"packets\": \"tlshello\""))
+        assertTrue(generated.contains("\"length\": \"10-20\""))
+    }
+
+    @Test
+    fun generatesModernSingBox114ConfigWithoutDeprecatedFields() {
+        val profile = ServerProfile(
+            name = "Hysteria2 Node",
+            protocol = ProxyProtocol.HYSTERIA2,
+            address = "hy2.example.com",
+            port = 443,
+            uuidOrPassword = "secret-pass",
+            sni = "hy2.example.com"
+        )
+        val settings = AppSettings(
+            blockQuic = true,
+            outboundDomainStrategy = "UseIPv4"
+        )
+        val generated = com.v2vex.client.core.SingBoxConfigGenerator.generate(profile, settings)
+        assertTrue(XrayConfigGenerator.validateJson(generated).isSuccess)
+        assertTrue(generated.contains("\"action\": \"sniff\""))
+        assertTrue(generated.contains("\"action\": \"hijack-dns\""))
+        assertTrue(generated.contains("\"action\": \"reject\""))
+        assertTrue(generated.contains("\"type\": \"https\""))
+        assertTrue(generated.contains("\"domain_strategy\": \"ipv4_only\""))
+        assertFalse(generated.contains("\"type\": \"block\""))
+    }
 }

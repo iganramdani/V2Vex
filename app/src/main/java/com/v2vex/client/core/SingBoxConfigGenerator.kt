@@ -3,6 +3,8 @@ package com.v2vex.client.core
 import com.v2vex.client.model.AppSettings
 import com.v2vex.client.model.ProxyProtocol
 import com.v2vex.client.model.RoutingPreset
+import com.v2vex.client.model.RuleMatchType
+import com.v2vex.client.model.RuleTarget
 import com.v2vex.client.model.SecurityType
 import com.v2vex.client.model.ServerProfile
 import com.v2vex.client.model.TransportType
@@ -13,10 +15,14 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import java.net.URI
 
 /**
- * Generates valid Sing-box 1.10+ JSON configuration for Dual-Core mode:
- * supports Hysteria2, TUIC v5, VLESS (REALITY/Vision), VMess, Trojan, Shadowsocks, WireGuard.
+ * Generates modern Sing-box 1.12–1.14+ compliant JSON configuration for Dual-Core mode:
+ * - Uses modern route actions ("sniff", "hijack-dns", "reject") instead of removed legacy fields
+ * - Uses modern typed DNS servers ("https", "udp") compatible with Sing-box 1.12+ / 1.14+
+ * - Supports Hysteria2, TUIC v5, VLESS (REALITY/Vision), VMess, Trojan, Shadowsocks, WireGuard
+ * - Supports QUIC Guard (UDP:443 reject), Carrier NAT64 IPv4 strategy, and Custom Routing Rules
  */
 object SingBoxConfigGenerator {
 
@@ -28,30 +34,34 @@ object SingBoxConfigGenerator {
         }
 
         val listenAddr = if (settings.allowLan) "0.0.0.0" else "127.0.0.1"
+        val sbStrategy = when (settings.outboundDomainStrategy) {
+            "UseIPv4" -> "ipv4_only"
+            "UseIPv6" -> "ipv6_only"
+            else -> null
+        }
 
         val root = buildJsonObject {
             putJsonObject("log") {
-                put("level", when (settings.logLevel) {
-                    "warning" -> "warn"
-                    else -> settings.logLevel
-                })
+                put(
+                    "level",
+                    when (settings.logLevel) {
+                        "warning" -> "warn"
+                        "none" -> "fatal"
+                        else -> settings.logLevel
+                    }
+                )
                 put("timestamp", true)
             }
 
             putJsonObject("dns") {
                 putJsonArray("servers") {
-                    add(buildJsonObject {
-                        put("tag", "remote")
-                        put("address", settings.dns.remoteDns.ifBlank { "https://1.1.1.1/dns-query" })
-                        put("detour", "proxy")
-                    })
-                    add(buildJsonObject {
-                        put("tag", "direct-dns")
-                        put("address", settings.dns.directDns.ifBlank { "1.1.1.1" })
-                        put("detour", "direct")
-                    })
+                    add(buildDnsServer("remote-dns", settings.dns.remoteDns.ifBlank { "https://1.1.1.1/dns-query" }, "proxy"))
+                    add(buildDnsServer("direct-dns", settings.dns.directDns.ifBlank { "1.1.1.1" }, null))
                 }
-                put("final", "remote")
+                if (sbStrategy != null) {
+                    put("strategy", sbStrategy)
+                }
+                put("final", "remote-dns")
             }
 
             putJsonArray("inbounds") {
@@ -60,31 +70,103 @@ object SingBoxConfigGenerator {
                     put("tag", "socks-in")
                     put("listen", listenAddr)
                     put("listen_port", settings.socksPort)
-                    put("sniff", settings.sniffing.enabled)
                 })
                 add(buildJsonObject {
                     put("type", "http")
                     put("tag", "http-in")
                     put("listen", listenAddr)
                     put("listen_port", settings.httpPort)
-                    put("sniff", settings.sniffing.enabled)
                 })
             }
 
             putJsonArray("outbounds") {
-                add(buildProxyOutbound(profile))
+                add(buildProxyOutbound(profile, sbStrategy))
                 add(buildJsonObject {
                     put("type", "direct")
                     put("tag", "direct")
-                })
-                add(buildJsonObject {
-                    put("type", "block")
-                    put("tag", "block")
+                    if (sbStrategy != null) put("domain_strategy", sbStrategy)
                 })
             }
 
             putJsonObject("route") {
+                put("default_domain_resolver", "direct-dns")
                 putJsonArray("rules") {
+                    // Modern Sing-box 1.11+ sniffing & port-53 DNS hijack actions
+                    if (settings.sniffing.enabled) {
+                        add(buildJsonObject {
+                            put("action", "sniff")
+                        })
+                    }
+                    add(buildJsonObject {
+                        put("protocol", "dns")
+                        put("action", "hijack-dns")
+                    })
+
+                    // QUIC (UDP:443) Guard
+                    if (settings.blockQuic) {
+                        add(buildJsonObject {
+                            put("network", "udp")
+                            put("port", 443)
+                            put("action", "reject")
+                        })
+                    }
+
+                    // User-defined custom rules (domains, IPs, ports — skip Xray-only geosite:/geoip: tokens cleanly)
+                    settings.customRules.filter { it.enabled && it.values.isNotBlank() }.forEach { rule ->
+                        val items = rule.values.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                        when (rule.matchType) {
+                            RuleMatchType.DOMAIN -> {
+                                val exact = mutableListOf<String>()
+                                val suffix = mutableListOf<String>()
+                                val keyword = mutableListOf<String>()
+                                items.forEach { raw ->
+                                    when {
+                                        raw.startsWith("geosite:", ignoreCase = true) -> Unit // Xray .dat only
+                                        raw.startsWith("full:", ignoreCase = true) -> exact += raw.removePrefix("full:").trim()
+                                        raw.startsWith("domain:", ignoreCase = true) -> suffix += raw.removePrefix("domain:").trim()
+                                        raw.startsWith("keyword:", ignoreCase = true) -> keyword += raw.removePrefix("keyword:").trim()
+                                        !raw.contains(":") -> suffix += raw
+                                    }
+                                }
+                                if (exact.isNotEmpty() || suffix.isNotEmpty() || keyword.isNotEmpty()) {
+                                    add(buildJsonObject {
+                                        if (exact.isNotEmpty()) putJsonArray("domain") { exact.forEach { add(it) } }
+                                        if (suffix.isNotEmpty()) putJsonArray("domain_suffix") { suffix.forEach { add(it) } }
+                                        if (keyword.isNotEmpty()) putJsonArray("domain_keyword") { keyword.forEach { add(it) } }
+                                        applyRuleTarget(this, rule.target)
+                                    })
+                                }
+                            }
+                            RuleMatchType.IP -> {
+                                val cidrs = items.filter { !it.startsWith("geoip:", ignoreCase = true) }
+                                    .map { if (it.contains("/")) it else if (it.contains(":")) "$it/128" else "$it/32" }
+                                if (cidrs.isNotEmpty()) {
+                                    add(buildJsonObject {
+                                        putJsonArray("ip_cidr") { cidrs.forEach { add(it) } }
+                                        applyRuleTarget(this, rule.target)
+                                    })
+                                }
+                            }
+                            RuleMatchType.PORT -> {
+                                val ports = items.mapNotNull { it.toIntOrNull() }.filter { it in 1..65535 }
+                                if (ports.isNotEmpty()) {
+                                    add(buildJsonObject {
+                                        putJsonArray("port") { ports.forEach { add(it) } }
+                                        applyRuleTarget(this, rule.target)
+                                    })
+                                }
+                            }
+                            RuleMatchType.PROTOCOL -> {
+                                if (items.isNotEmpty()) {
+                                    add(buildJsonObject {
+                                        putJsonArray("protocol") { items.forEach { add(it) } }
+                                        applyRuleTarget(this, rule.target)
+                                    })
+                                }
+                            }
+                        }
+                    }
+
                     if (settings.routingPreset == RoutingPreset.BYPASS_LAN ||
                         settings.routingPreset == RoutingPreset.ADBLOCK_BYPASS_LAN
                     ) {
@@ -101,8 +183,48 @@ object SingBoxConfigGenerator {
         return prettyJson.encodeToString(JsonObject.serializer(), root)
     }
 
-    private fun buildProxyOutbound(profile: ServerProfile): JsonObject = buildJsonObject {
+    private fun applyRuleTarget(
+        builder: kotlinx.serialization.json.JsonObjectBuilder,
+        target: RuleTarget
+    ) {
+        when (target) {
+            RuleTarget.BLOCK -> builder.put("action", "reject")
+            RuleTarget.DIRECT -> builder.put("outbound", "direct")
+            RuleTarget.PROXY -> builder.put("outbound", "proxy")
+        }
+    }
+
+    private fun buildDnsServer(tag: String, rawAddr: String, detour: String?): JsonObject = buildJsonObject {
+        put("tag", tag)
+        val trimmed = rawAddr.trim()
+        when {
+            trimmed.startsWith("https://", ignoreCase = true) -> {
+                val uri = runCatching { URI(trimmed) }.getOrNull()
+                put("type", "https")
+                put("server", uri?.host ?: "1.1.1.1")
+                if ((uri?.port ?: -1) > 0) put("server_port", uri!!.port)
+                put("path", uri?.path?.takeIf { it.isNotBlank() } ?: "/dns-query")
+            }
+            trimmed.startsWith("tls://", ignoreCase = true) -> {
+                val uri = runCatching { URI(trimmed) }.getOrNull()
+                put("type", "tls")
+                put("server", uri?.host ?: "1.1.1.1")
+                if ((uri?.port ?: -1) > 0) put("server_port", uri!!.port)
+            }
+            else -> {
+                val host = trimmed.removePrefix("udp://").substringBefore(":")
+                put("type", "udp")
+                put("server", host.ifBlank { "1.1.1.1" })
+            }
+        }
+        if (!detour.isNullOrBlank()) {
+            put("detour", detour)
+        }
+    }
+
+    private fun buildProxyOutbound(profile: ServerProfile, domainStrategy: String?): JsonObject = buildJsonObject {
         put("tag", "proxy")
+        if (domainStrategy != null) put("domain_strategy", domainStrategy)
         when (profile.protocol) {
             ProxyProtocol.HYSTERIA2 -> {
                 put("type", "hysteria2")
@@ -226,7 +348,11 @@ object SingBoxConfigGenerator {
             builder.putJsonObject("tls") {
                 put("enabled", true)
                 put("server_name", profile.sni.ifBlank { profile.address })
-                put("insecure", profile.allowInsecure)
+                // If user uses Safe SNI Spoofing (verifyPeerCertByName) where SNI != cert CN, Sing-box needs insecure=true
+                val needsInsecureForSpoof = profile.allowInsecure ||
+                    (profile.verifyPeerCertByName.isNotBlank() &&
+                        !profile.verifyPeerCertByName.equals(profile.sni, ignoreCase = true))
+                put("insecure", needsInsecureForSpoof)
                 if (profile.fingerprint.isNotBlank()) {
                     putJsonObject("utls") {
                         put("enabled", true)

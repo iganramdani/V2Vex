@@ -39,6 +39,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 /**
@@ -80,11 +82,16 @@ class V2VexVpnService : VpnService() {
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val lifecycleMutex = Mutex()
     private var vpnInterface: ParcelFileDescriptor? = null
     private var xrayProcess: XrayProcessManager? = null
     private var telemetryJob: Job? = null
+    private var reloadJob: Job? = null
     private var tproxyActive = false
     private var networkCallbackRegistered = false
+    @Volatile private var lastGoodConfigJson: String? = null
+    @Volatile private var lastGoodUseSingBox: Boolean = false
+    @Volatile private var lastGoodCoreStatus: String = ""
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -148,54 +155,61 @@ class V2VexVpnService : VpnService() {
         )
 
         serviceScope.launch(Dispatchers.IO) {
-            try {
-                app.coreManager.ensureBundledGeoAssets()
-                val useSingBox = shouldUseSingBox(profile, settings)
-                val configJson = buildEngineConfig(app, profile, settings, useSingBox)
-                LogBuffer.i(
-                    "VPN",
-                    "Config ready (${configJson.length}B) | engine=${if (useSingBox) "Sing-box" else "Xray"} | node='${profile.name}' (${profile.shortBadge()}) | routing=${settings.routingPreset} | blockQuic=${settings.blockQuic} | dialStrat=${settings.outboundDomainStrategy} | frag=${settings.fragment.enabled} | mux=${settings.mux.enabled}"
-                )
+            lifecycleMutex.withLock {
+                try {
+                    app.coreManager.ensureBundledGeoAssets()
+                    val useSingBox = shouldUseSingBox(profile, settings)
+                    val configJson = buildEngineConfig(app, profile, settings, useSingBox)
+                    LogBuffer.i(
+                        "VPN",
+                        "Config ready (${configJson.length}B) | engine=${if (useSingBox) "Sing-box" else "Xray"} | node='${profile.name}' (${profile.shortBadge()}) | routing=${settings.routingPreset} | blockQuic=${settings.blockQuic} | dialStrat=${settings.outboundDomainStrategy} | frag=${settings.fragment.enabled} | mux=${settings.mux.enabled}"
+                    )
 
-                val (coreStarted, coreStatus) = xrayProcess?.start(
-                    configJson = configJson,
-                    scope = serviceScope,
-                    useSingBox = useSingBox
-                ) { exitCode ->
-                    stopTunnel("Core engine exited ($exitCode)")
-                } ?: (false to "Core manager unavailable")
+                    val (coreStarted, coreStatus) = xrayProcess?.start(
+                        configJson = configJson,
+                        scope = serviceScope,
+                        useSingBox = useSingBox
+                    ) { exitCode, reason ->
+                        val msg = if (!reason.isNullOrBlank()) "Core exited ($exitCode): $reason" else "Core exited ($exitCode)"
+                        stopTunnel(msg)
+                    } ?: (false to "Core manager unavailable")
 
-                if (!coreStarted) {
-                    stopTunnel(coreStatus)
-                    return@launch
+                    if (!coreStarted) {
+                        stopTunnel(coreStatus)
+                        return@withLock
+                    }
+
+                    lastGoodConfigJson = configJson
+                    lastGoodUseSingBox = useSingBox
+                    lastGoodCoreStatus = coreStatus
+
+                    val pfd = establishTunInterface(profile, settings)
+                    val tproxyCfg = writeTProxyConfig(settings)
+                    val startedTun = TProxyService.TProxyStartService(tproxyCfg.absolutePath, pfd.fd)
+                    if (!startedTun) {
+                        LogBuffer.e("TUN", "TProxyStartService returned false! fd=${pfd.fd}")
+                        stopTunnel("Failed to start L3 hev-socks5-tunnel engine")
+                        return@withLock
+                    }
+                    tproxyActive = true
+                    registerNetworkHandoverCallback()
+
+                    LogBuffer.i(
+                        "TUN",
+                        "L3 TUN ACTIVE | fd=${pfd.fd} | MTU=${settings.vpnMtu} | SOCKS=127.0.0.1:${settings.socksPort}"
+                    )
+
+                    VpnStateHolder.setConnected(
+                        profileId = profile.id,
+                        profileName = profile.name,
+                        badge = profile.shortBadge(),
+                        coreMode = "$coreStatus · L3 TUN"
+                    )
+                    startTelemetryLoop(profile)
+                } catch (t: Throwable) {
+                    LogBuffer.e("VPN", "Tunnel start failed: ${t.javaClass.simpleName}: ${t.message}")
+                    stopTunnel(error = t.message ?: "Failed to start VPN")
                 }
-
-                val pfd = establishTunInterface(profile, settings)
-                val tproxyCfg = writeTProxyConfig(settings)
-                val startedTun = TProxyService.TProxyStartService(tproxyCfg.absolutePath, pfd.fd)
-                if (!startedTun) {
-                    LogBuffer.e("TUN", "TProxyStartService returned false! fd=${pfd.fd}")
-                    stopTunnel("Failed to start L3 hev-socks5-tunnel engine")
-                    return@launch
-                }
-                tproxyActive = true
-                registerNetworkHandoverCallback()
-
-                LogBuffer.i(
-                    "TUN",
-                    "L3 TUN ACTIVE | fd=${pfd.fd} | MTU=${settings.vpnMtu} | SOCKS=127.0.0.1:${settings.socksPort}"
-                )
-
-                VpnStateHolder.setConnected(
-                    profileId = profile.id,
-                    profileName = profile.name,
-                    badge = profile.shortBadge(),
-                    coreMode = "$coreStatus · L3 TUN"
-                )
-                startTelemetryLoop(profile)
-            } catch (t: Throwable) {
-                LogBuffer.e("VPN", "Tunnel start failed: ${t.javaClass.simpleName}: ${t.message}")
-                stopTunnel(error = t.message ?: "Failed to start VPN")
             }
         }
     }
@@ -230,46 +244,80 @@ class V2VexVpnService : VpnService() {
             }
         } else emptyList()
 
+        val validGeoIp = app.coreManager.availableGeoIpTags().toSet()
+        val validGeoSite = app.coreManager.availableGeoSiteTags().toSet()
+
         return XrayConfigGenerator.generate(
             profile = profile,
             settings = settings,
             hasGeoIp = app.coreManager.hasGeoIp(),
             hasGeoSite = app.coreManager.hasGeoSite(),
             chainProfile = chainProfile,
-            failoverProfiles = failovers
+            failoverProfiles = failovers,
+            validGeoIpTags = validGeoIp,
+            validGeoSiteTags = validGeoSite
         )
     }
 
     private fun reloadCoreOnly() {
-        val app = application as V2VexApp
-        val profile = app.repository.getSelectedProfile() ?: return
-        val settings = app.repository.settings.value
+        // Coalesce rapid setting taps into a single clean reload — eliminates exit-143/141 races!
+        reloadJob?.cancel()
+        reloadJob = serviceScope.launch(Dispatchers.IO) {
+            delay(280)
+            lifecycleMutex.withLock {
+                if (!tproxyActive) return@withLock
+                val app = application as V2VexApp
+                val profile = app.repository.getSelectedProfile() ?: return@withLock
+                val settings = app.repository.settings.value
+                try {
+                    val useSingBox = shouldUseSingBox(profile, settings)
+                    val configJson = buildEngineConfig(app, profile, settings, useSingBox)
+                    val (ok, coreStatus) = xrayProcess?.start(
+                        configJson = configJson,
+                        scope = serviceScope,
+                        useSingBox = useSingBox
+                    ) { exitCode, reason ->
+                        val msg = if (!reason.isNullOrBlank()) "Core exited ($exitCode): $reason" else "Core exited ($exitCode)"
+                        stopTunnel(msg)
+                    } ?: (false to "Core error")
 
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                val useSingBox = shouldUseSingBox(profile, settings)
-                val configJson = buildEngineConfig(app, profile, settings, useSingBox)
-                val (ok, coreStatus) = xrayProcess?.start(
-                    configJson = configJson,
-                    scope = serviceScope,
-                    useSingBox = useSingBox
-                ) { exitCode ->
-                    stopTunnel("Core engine exited ($exitCode)")
-                } ?: (false to "Core error")
-
-                if (ok) {
-                    VpnStateHolder.setConnected(
-                        profileId = profile.id,
-                        profileName = profile.name,
-                        badge = profile.shortBadge(),
-                        coreMode = "$coreStatus · L3 TUN"
-                    )
-                    LogBuffer.i("VPN", "Hot-reloaded '${profile.name}' (blockQuic=${settings.blockQuic}, dial=${settings.outboundDomainStrategy}, log=${settings.logLevel})")
-                } else {
-                    stopTunnel(coreStatus)
+                    if (ok) {
+                        lastGoodConfigJson = configJson
+                        lastGoodUseSingBox = useSingBox
+                        lastGoodCoreStatus = coreStatus
+                        VpnStateHolder.setConnected(
+                            profileId = profile.id,
+                            profileName = profile.name,
+                            badge = profile.shortBadge(),
+                            coreMode = "$coreStatus · L3 TUN"
+                        )
+                        LogBuffer.i(
+                            "VPN",
+                            "Hot-reloaded '${profile.name}' (engine=${if (useSingBox) "Sing-box" else "Xray"}, blockQuic=${settings.blockQuic}, dial=${settings.outboundDomainStrategy}, log=${settings.logLevel})"
+                        )
+                    } else if (coreStatus != "Superseded" && coreStatus != "Superseded by newer start") {
+                        LogBuffer.w("VPN", "Hot-reload rejected ($coreStatus) — rolling back to last healthy config")
+                        val fallbackJson = lastGoodConfigJson
+                        if (!fallbackJson.isNullOrBlank()) {
+                            val (rolledBack, rbStatus) = xrayProcess?.start(
+                                configJson = fallbackJson,
+                                scope = serviceScope,
+                                useSingBox = lastGoodUseSingBox
+                            ) { exitCode, reason ->
+                                stopTunnel("Core exited ($exitCode)${reason?.let { ": $it" } ?: ""}")
+                            } ?: (false to "Rollback failed")
+                            if (rolledBack) {
+                                LogBuffer.i("VPN", "Rollback succeeded ($rbStatus) — tunnel preserved!")
+                            } else {
+                                stopTunnel(coreStatus)
+                            }
+                        } else {
+                            stopTunnel(coreStatus)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    LogBuffer.e("VPN", "Hot-reload failed: ${t.message}")
                 }
-            } catch (t: Throwable) {
-                LogBuffer.e("VPN", "Hot-reload failed: ${t.message}")
             }
         }
     }
@@ -459,6 +507,8 @@ class V2VexVpnService : VpnService() {
     }
 
     private fun stopTunnel(error: String? = null) {
+        reloadJob?.cancel()
+        reloadJob = null
         telemetryJob?.cancel()
         telemetryJob = null
         unregisterNetworkHandoverCallback()
@@ -478,6 +528,7 @@ class V2VexVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        reloadJob?.cancel()
         telemetryJob?.cancel()
         unregisterNetworkHandoverCallback()
         stopTProxy()

@@ -67,7 +67,7 @@ jobs:
 
           TAG_NAME="${GITHUB_REF_NAME}"
           if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
-            TAG_NAME="v3.0.0-ci"
+            TAG_NAME="v3.1.0-ci"
           fi
           APK_NAME="V2Vex-${TAG_NAME}-arm64-v8a-release.apk"
 
@@ -86,6 +86,7 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify "$APK_NAME"
           echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
           echo "CORE_VER=$(cat app/src/main/assets/core_version.txt || echo latest)" >> "$GITHUB_ENV"
+          echo "SINGBOX_VER=$(cat app/src/main/assets/singbox_version.txt || echo latest)" >> "$GITHUB_ENV"
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
@@ -99,16 +100,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" "${APK_NAME}" \
-            --title "V2Vex ${GITHUB_REF_NAME} — Two-Tone Minimalist Flagship" \
-            --notes "## ⚪⚫ V2Vex ${GITHUB_REF_NAME} — Two-Tone Minimalist Flagship
+            --title "V2Vex ${GITHUB_REF_NAME} — True Bundled Dual-Core (Xray + Sing-box) & Visual GeoSite Studio" \
+            --notes "## ⚪⚫ V2Vex ${GITHUB_REF_NAME} — True Bundled Dual-Core & Visual GeoSite Studio
 
-          ### 🔥 What's New in ${GITHUB_REF_NAME}
-          - ⚪⚫ **Two-Tone Minimalist UX**: Architectural monochrome design (**Obsidian Two-Tone**, **AMOLED Monochrome**, **Paper & Ink**) with tabular monospace numerals and hairline geometry.
-          - 📊 **Zero-Loopback Pure L3 Speed Meter + Screen-Off Saver**: Calibrated on real Xiaomi Redmi Note 9 hardware — strictly \`TProxyGetStats()\` + \`SpeedLabTrafficCounter\` (eliminates 2.6x–7.3x Android eBPF loopback inflation) and pauses SystemUI wakeups when screen is locked!
-          - 🪵 **Native \`.txt\` Diagnostic Logger + Live Connection Firewall**: Pinned System Logs (never evicted by Xray debug stream) + Engine Logs, **Save \`.txt\` File (SAF)** & **Share \`logV2Vex.txt\` (\`FileProvider\`)**, plus real-time domain monitor with 1-tap \`Block\` / \`Direct\` rules.
-          - 🧪 **BugHost / CDN Sniper Studio + Safe SNI Spoofing**: Concurrent TLS SNI + HTTP HEAD CDN scanner + \`verifyPeerCertByName\` certificate pinning (fixes SNI-spoof \`x509\` errors without \`allowInsecure\`!).
-          - ☁️ **1-Click Free Cloudflare WARP Generator**: Pure-Kotlin RFC 7748 Curve25519 registration for instant clean-IP WireGuard & Multi-Hop Proxy Chaining.
-          - ⚡ **Port-53 \`dns-out\` Hijack · QUIC 443 Guard · NAT64 \`UseIPv4\` Fix · MIUI Battery Saver Helper · Tasker Intents · Open-Source Credits**.
+          ### 🔥 Fixed & Upgraded in ${GITHUB_REF_NAME} (Forensic Audit from Real Device \`logV2Vex.txt\`)
+          - 🚀 **Bundled Sing-box Core (\`libsingbox.so\` ${SINGBOX_VER})**: Sing-box now ships directly inside \`jniLibs\` (Android 10–15 W^X compliant, zero external plugin APK needed!) with full **Sing-box 1.12–1.14+ schema** (\`action: sniff\`, \`hijack-dns\`, \`reject\`, typed DoH DNS, QUIC Guard, NAT64 strategy).
+          - 🌍 **Visual GeoSite & GeoIP Rule Studio + 1-Tap Quick Packs**: Pure-Kotlin protobuf wire scanner reads ALL real tags directly from \`geosite.dat\` & \`geoip.dat\`! Toggle **Block Ads**, **Direct Indonesia**, **Proxy Streaming**, **Proxy AI & Dev**, or **Proxy Social** in 1 tap, or search & tap tags visually with zero typos.
+          - 🛡️ **Zero-Crash Hot-Reload + Automatic Rollback**: Serialized \`Mutex\` lifecycle + 450ms smart settings debounce + generation-guarded process manager completely eliminates exit-code-143/141 race kills and exit-code-23 invalid-tag/fragment crashes — automatically rolling back to the last healthy config if a rule fails!
+          - 🪵 **Pinned Fatal Stderr Capture**: Exact Xray / Sing-box startup error lines are now pinned straight into System Logs & exported \`.txt\` reports.
 
           ### 🙏 Respect & Attribution
-          Powered by **XTLS/Xray-core** (\`${CORE_VER}\`), **heiher/hev-socks5-tunnel**, and **Loyalsoldier/v2ray-rules-dat**. Full credits in [CREDITS.md](https://github.com/iganramdani/V2Vex/blob/main/CREDITS.md)."
+          Powered by **XTLS/Xray-core** (\`${CORE_VER}\`), **SagerNet/sing-box** (\`${SINGBOX_VER}\`), **heiher/hev-socks5-tunnel**, and **Loyalsoldier/v2ray-rules-dat**. Full credits in [CREDITS.md](https://github.com/iganramdani/V2Vex/blob/main/CREDITS.md)."

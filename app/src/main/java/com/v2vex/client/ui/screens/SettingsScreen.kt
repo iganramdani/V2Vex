@@ -136,6 +136,8 @@ fun SettingsScreen(
     settings: AppSettings,
     profiles: List<ServerProfile>,
     coreInfo: CoreInfo,
+    geoSiteTags: List<String>,
+    geoIpTags: List<String>,
     coreUpdateBusy: Boolean,
     coreUpdateProgress: Float,
     coreUpdateStatus: String,
@@ -153,6 +155,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var showAddRuleDialog by remember { mutableStateOf(false) }
+    var editingRule by remember { mutableStateOf<CustomRoutingRule?>(null) }
     var showAppPickerDialog by remember { mutableStateOf(false) }
     var showRestoreDialog by remember { mutableStateOf(false) }
 
@@ -161,12 +164,27 @@ fun SettingsScreen(
         pm?.isIgnoringBatteryOptimizations(context.packageName) == true
     }
 
-    if (showAddRuleDialog) {
+    if (showAddRuleDialog || editingRule != null) {
         AddRoutingRuleDialog(
-            onDismiss = { showAddRuleDialog = false },
-            onAdd = { rule ->
-                onUpdateSettings { it.copy(customRules = it.customRules + rule) }
+            initialRule = editingRule,
+            geoSiteTags = geoSiteTags,
+            geoIpTags = geoIpTags,
+            onDismiss = {
                 showAddRuleDialog = false
+                editingRule = null
+            },
+            onSave = { rule ->
+                onUpdateSettings { s ->
+                    val exists = s.customRules.any { it.id == rule.id }
+                    val next = if (exists) {
+                        s.customRules.map { if (it.id == rule.id) rule else it }
+                    } else {
+                        s.customRules + rule
+                    }
+                    s.copy(customRules = next)
+                }
+                showAddRuleDialog = false
+                editingRule = null
             }
         )
     }
@@ -263,11 +281,20 @@ fun SettingsScreen(
         // 1. MODULAR DUAL-CORE & GEODATA MANAGER
         SettingsSectionCard(title = "Modular Dual-Core & GeoData") {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Installed Core", style = MaterialTheme.typography.bodyMedium)
+                Text("Xray-core", style = MaterialTheme.typography.bodyMedium)
                 Text(
                     text = coreInfo.installedVersion.take(26),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (coreInfo.executable) XrayEmerald else XrayAmber,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Sing-box", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = coreInfo.singBoxVersion.take(26),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (coreInfo.singBoxExecutable) XrayEmerald else XrayAmber,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -278,7 +305,7 @@ fun SettingsScreen(
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("GeoIP / GeoSite", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(
-                    "${SpeedMath.formatBytes(coreInfo.geoIpSizeBytes)} / ${SpeedMath.formatBytes(coreInfo.geoSiteSizeBytes)}",
+                    "${SpeedMath.formatBytes(coreInfo.geoIpSizeBytes)} (${geoIpTags.size}) / ${SpeedMath.formatBytes(coreInfo.geoSiteSizeBytes)} (${geoSiteTags.size})",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -423,6 +450,51 @@ fun SettingsScreen(
             }
 
             HorizontalDivider()
+            Text("1-Tap GeoSite & GeoIP Packs", style = MaterialTheme.typography.labelMedium)
+            val quickPacks = remember {
+                listOf(
+                    Triple("Block Ads", RuleMatchType.DOMAIN, "geosite:category-ads-all") to RuleTarget.BLOCK,
+                    Triple("Direct Indonesia", RuleMatchType.IP, "geoip:id") to RuleTarget.DIRECT,
+                    Triple("Proxy Streaming", RuleMatchType.DOMAIN, "geosite:youtube,geosite:netflix,geosite:spotify,geosite:disney") to RuleTarget.PROXY,
+                    Triple("Proxy AI & Dev", RuleMatchType.DOMAIN, "geosite:openai,geosite:anthropic,geosite:github") to RuleTarget.PROXY,
+                    Triple("Proxy Social", RuleMatchType.DOMAIN, "geosite:telegram,geosite:instagram,geosite:tiktok") to RuleTarget.PROXY
+                )
+            }
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                quickPacks.forEach { (spec, target) ->
+                    val (packName, matchType, values) = spec
+                    val existing = settings.customRules.firstOrNull { it.name == packName }
+                    val active = existing?.enabled == true
+                    FilterChip(
+                        selected = active,
+                        onClick = {
+                            onUpdateSettings { s ->
+                                val cur = s.customRules.firstOrNull { it.name == packName }
+                                val nextRules = if (cur != null) {
+                                    s.customRules.filterNot { it.name == packName }
+                                } else {
+                                    listOf(
+                                        CustomRoutingRule(
+                                            name = packName,
+                                            matchType = matchType,
+                                            values = values,
+                                            target = target
+                                        )
+                                    ) + s.customRules
+                                }
+                                s.copy(customRules = nextRules)
+                            }
+                            onShowMessage(if (active) "Removed '$packName'" else "Enabled '$packName' (${target.label})")
+                        },
+                        label = { Text(packName) }
+                    )
+                }
+            }
+
+            HorizontalDivider()
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -431,13 +503,15 @@ fun SettingsScreen(
                 Text("Custom Rules (${settings.customRules.size})", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = { showAddRuleDialog = true }) {
                     Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("Add Rule")
+                    Text("GeoSite / Rule")
                 }
             }
 
             settings.customRules.forEach { rule ->
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { editingRule = rule },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Switch(
@@ -761,23 +835,83 @@ private fun SettingToggleRow(
 
 @Composable
 private fun AddRoutingRuleDialog(
+    initialRule: CustomRoutingRule?,
+    geoSiteTags: List<String>,
+    geoIpTags: List<String>,
     onDismiss: () -> Unit,
-    onAdd: (CustomRoutingRule) -> Unit
+    onSave: (CustomRoutingRule) -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    var values by remember { mutableStateOf("") }
-    var matchType by remember { mutableStateOf(RuleMatchType.DOMAIN) }
-    var target by remember { mutableStateOf(RuleTarget.DIRECT) }
+    var name by remember(initialRule) { mutableStateOf(initialRule?.name ?: "") }
+    var values by remember(initialRule) { mutableStateOf(initialRule?.values ?: "") }
+    var matchType by remember(initialRule) { mutableStateOf(initialRule?.matchType ?: RuleMatchType.DOMAIN) }
+    var target by remember(initialRule) { mutableStateOf(initialRule?.target ?: RuleTarget.DIRECT) }
+    var geoSearch by remember { mutableStateOf("") }
+
+    val popularGeoSites = remember {
+        listOf(
+            "category-ads-all", "youtube", "google", "netflix", "spotify",
+            "openai", "anthropic", "github", "telegram", "instagram",
+            "tiktok", "facebook", "whatsapp", "twitter", "discord",
+            "steam", "private", "geolocation-!cn"
+        )
+    }
+    val popularGeoIps = remember {
+        listOf("private", "id", "sg", "us", "jp", "hk", "cn", "cloudflare", "google", "telegram", "facebook")
+    }
+
+    val pickerTags = remember(matchType, geoSearch, geoSiteTags, geoIpTags) {
+        when (matchType) {
+            RuleMatchType.DOMAIN -> {
+                val source = geoSiteTags.ifEmpty { popularGeoSites }
+                val q = geoSearch.trim().lowercase()
+                if (q.isBlank()) {
+                    val existingPop = popularGeoSites.filter { it in source }
+                    (existingPop + source.take(30)).distinct().take(24)
+                } else {
+                    source.filter { it.contains(q) }.take(30)
+                }
+            }
+            RuleMatchType.IP -> {
+                val source = geoIpTags.ifEmpty { popularGeoIps }
+                val q = geoSearch.trim().lowercase()
+                if (q.isBlank()) {
+                    val existingPop = popularGeoIps.filter { it in source }
+                    (existingPop + source.take(30)).distinct().take(24)
+                } else {
+                    source.filter { it.contains(q) }.take(30)
+                }
+            }
+            else -> emptyList()
+        }
+    }
+
+    val currentTokens = remember(values) {
+        values.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    fun toggleToken(token: String) {
+        val list = currentTokens.toMutableList()
+        val existingIdx = list.indexOfFirst { it.equals(token, ignoreCase = true) }
+        if (existingIdx >= 0) {
+            list.removeAt(existingIdx)
+        } else {
+            list.add(token)
+        }
+        values = list.joinToString(", ")
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add Routing Rule") },
+        title = { Text(if (initialRule == null) "GeoSite & Routing Rule" else "Edit Routing Rule") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Rule Label") },
+                    label = { Text("Rule Label (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -788,17 +922,11 @@ private fun AddRoutingRuleDialog(
                     RuleMatchType.entries.forEach { mt ->
                         FilterChip(
                             selected = matchType == mt,
-                            onClick = { matchType = mt },
+                            onClick = { matchType = mt; geoSearch = "" },
                             label = { Text(mt.label) }
                         )
                     }
                 }
-                OutlinedTextField(
-                    value = values,
-                    onValueChange = { values = it },
-                    label = { Text("Values (e.g. domain:google.com, geosite:netflix)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     RuleTarget.entries.forEach { t ->
                         FilterChip(
@@ -808,22 +936,71 @@ private fun AddRoutingRuleDialog(
                         )
                     }
                 }
+
+                // Visual GeoSite / GeoIP Picker (searches real geosite.dat / geoip.dat tags!)
+                if (matchType == RuleMatchType.DOMAIN || matchType == RuleMatchType.IP) {
+                    val prefix = if (matchType == RuleMatchType.DOMAIN) "geosite:" else "geoip:"
+                    val totalCount = if (matchType == RuleMatchType.DOMAIN) geoSiteTags.size else geoIpTags.size
+                    OutlinedTextField(
+                        value = geoSearch,
+                        onValueChange = { geoSearch = it },
+                        label = {
+                            Text(
+                                if (matchType == RuleMatchType.DOMAIN)
+                                    "Search GeoSite tags ($totalCount loaded)..."
+                                else
+                                    "Search GeoIP tags ($totalCount loaded)..."
+                            )
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        pickerTags.forEach { tag ->
+                            val fullToken = "$prefix$tag"
+                            val selected = currentTokens.any { it.equals(fullToken, ignoreCase = true) }
+                            FilterChip(
+                                selected = selected,
+                                onClick = { toggleToken(fullToken) },
+                                label = { Text(tag) }
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = values,
+                    onValueChange = { values = it },
+                    label = {
+                        Text(
+                            when (matchType) {
+                                RuleMatchType.DOMAIN -> "Selected / Custom (geosite:..., domain:...)"
+                                RuleMatchType.IP -> "Selected / Custom (geoip:..., 1.1.1.0/24)"
+                                RuleMatchType.PORT -> "Ports (e.g. 53, 443, 8000-9000)"
+                                RuleMatchType.PROTOCOL -> "Protocols (http, tls, bittorrent)"
+                            }
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         },
         confirmButton = {
             Button(
                 enabled = values.isNotBlank(),
                 onClick = {
-                    onAdd(
-                        CustomRoutingRule(
-                            name = name.ifBlank { "${matchType.label} Rule" },
-                            matchType = matchType,
-                            values = values.trim(),
-                            target = target
-                        )
+                    val rule = (initialRule ?: CustomRoutingRule()).copy(
+                        name = name.ifBlank { "${target.label} · ${currentTokens.firstOrNull()?.take(20) ?: matchType.label}" },
+                        matchType = matchType,
+                        values = values.trim(),
+                        target = target
                     )
+                    onSave(rule)
                 }
-            ) { Text("Add") }
+            ) { Text(if (initialRule == null) "Add" else "Save") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
