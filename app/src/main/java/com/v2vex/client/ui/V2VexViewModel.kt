@@ -138,7 +138,8 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
             speedUnit = b.speedUnit,
             speedTest = b.speedTest,
             customCoreRepo = b.customCoreRepo,
-            customGeoRepo = b.customGeoRepo
+            customGeoRepo = b.customGeoRepo,
+            batteryBannerDismissed = b.batteryBannerDismissed
         )
         return aNorm != b
     }
@@ -320,38 +321,53 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
     fun checkAndUpdateCore() {
         viewModelScope.launch {
             _coreUpdateBusy.value = true
-            _coreUpdateProgress.value = 0.05f
+            _coreUpdateProgress.value = 0.1f
+            _coreUpdateStatus.value = "Checking Xray-core, Sing-box & V2Vex APK..."
 
-            // Check V2Vex APK release (for Android 10+ W^X compliant libxray.so upgrades)
+            val xrayRes = app.coreManager.checkLatestXrayRelease(settings.value.customCoreRepo)
+            _coreUpdateProgress.value = 0.4f
+            val sbRes = app.coreManager.checkLatestSingBoxRelease()
+            _coreUpdateProgress.value = 0.7f
+            val apkRes = app.coreManager.checkAppReleaseUpdate()
+            apkRes.onSuccess { rel -> _appUpdateRelease.value = rel }
+
+            val xrayLatest = xrayRes.getOrNull()?.tagName ?: "check failed"
+            val sbLatest = sbRes.getOrNull()?.tagName ?: "check failed"
+            val apkLatest = apkRes.getOrNull()?.tagName ?: ""
+
             if (app.coreManager.isWxEnforced()) {
-                _coreUpdateStatus.value = "Checking latest V2Vex APK & GeoData..."
-                app.coreManager.checkAppReleaseUpdate().onSuccess { rel ->
-                    _appUpdateRelease.value = rel
-                }
-            }
-
-            _coreUpdateStatus.value = "Checking ${settings.value.customCoreRepo}..."
-            app.coreManager.checkLatestXrayRelease(settings.value.customCoreRepo).fold(
-                onSuccess = { release ->
-                    app.coreManager.downloadAndInstallXrayCore(release) { frac, msg ->
+                // On Android 10-15 (W^X), jniLibs (libxray.so & libsingbox.so) are updated via V2Vex APK release!
+                _coreUpdateProgress.value = 1f
+                val summary = "Latest: Xray $xrayLatest · Sing-box $sbLatest" +
+                    if (apkLatest.isNotBlank()) " · App $apkLatest" else ""
+                _coreUpdateStatus.value = summary
+                com.v2vex.client.core.LogBuffer.i("Core", "Dual-Core check -> $summary")
+                emitMessage(summary)
+                _coreInfo.value = app.coreManager.inspectInstalledCore()
+            } else {
+                // Pre-Android 10: allow hot-swapping Xray binary directly
+                val xrayRel = xrayRes.getOrNull()
+                if (xrayRel != null) {
+                    app.coreManager.downloadAndInstallXrayCore(xrayRel) { frac, msg ->
                         _coreUpdateProgress.value = frac
                         _coreUpdateStatus.value = msg
                     }.fold(
                         onSuccess = { info ->
                             _coreInfo.value = info
-                            emitMessage(_coreUpdateStatus.value)
+                            val msg = "Xray $xrayLatest updated · Sing-box latest: $sbLatest"
+                            _coreUpdateStatus.value = msg
+                            emitMessage(msg)
                         },
                         onFailure = { err ->
                             _coreUpdateStatus.value = "Update failed: ${err.message}"
                             emitMessage("Core update failed: ${err.message}")
                         }
                     )
-                },
-                onFailure = { err ->
-                    _coreUpdateStatus.value = "Check failed: ${err.message}"
-                    emitMessage("GitHub check failed: ${err.message}")
+                } else {
+                    _coreUpdateStatus.value = "Check failed: ${xrayRes.exceptionOrNull()?.message}"
+                    emitMessage("GitHub check failed")
                 }
-            )
+            }
             _coreUpdateBusy.value = false
         }
     }

@@ -158,30 +158,15 @@ class V2VexVpnService : VpnService() {
             lifecycleMutex.withLock {
                 try {
                     app.coreManager.ensureBundledGeoAssets()
-                    val useSingBox = shouldUseSingBox(profile, settings)
-                    val configJson = buildEngineConfig(app, profile, settings, useSingBox)
-                    LogBuffer.i(
-                        "VPN",
-                        "Config ready (${configJson.length}B) | engine=${if (useSingBox) "Sing-box" else "Xray"} | node='${profile.name}' (${profile.shortBadge()}) | routing=${settings.routingPreset} | blockQuic=${settings.blockQuic} | dialStrat=${settings.outboundDomainStrategy} | frag=${settings.fragment.enabled} | mux=${settings.mux.enabled}"
-                    )
-
-                    val (coreStarted, coreStatus) = xrayProcess?.start(
-                        configJson = configJson,
-                        scope = serviceScope,
-                        useSingBox = useSingBox
-                    ) { exitCode, reason ->
-                        val msg = if (!reason.isNullOrBlank()) "Core exited ($exitCode): $reason" else "Core exited ($exitCode)"
-                        stopTunnel(msg)
-                    } ?: (false to "Core manager unavailable")
-
-                    if (!coreStarted) {
-                        stopTunnel(coreStatus)
+                    val launchRes = launchEngineWithDualCoreFallback(app, profile, settings)
+                    if (!launchRes.ok) {
+                        stopTunnel(launchRes.status)
                         return@withLock
                     }
 
-                    lastGoodConfigJson = configJson
-                    lastGoodUseSingBox = useSingBox
-                    lastGoodCoreStatus = coreStatus
+                    lastGoodConfigJson = launchRes.configJson
+                    lastGoodUseSingBox = launchRes.useSingBox
+                    lastGoodCoreStatus = launchRes.status
 
                     val pfd = establishTunInterface(profile, settings)
                     val tproxyCfg = writeTProxyConfig(settings)
@@ -203,7 +188,7 @@ class V2VexVpnService : VpnService() {
                         profileId = profile.id,
                         profileName = profile.name,
                         badge = profile.shortBadge(),
-                        coreMode = "$coreStatus · L3 TUN"
+                        coreMode = "${launchRes.status} · L3 TUN"
                     )
                     startTelemetryLoop(profile)
                 } catch (t: Throwable) {
@@ -214,24 +199,94 @@ class V2VexVpnService : VpnService() {
         }
     }
 
+    private data class EngineLaunchResult(
+        val ok: Boolean,
+        val status: String,
+        val configJson: String,
+        val useSingBox: Boolean
+    )
+
+    /**
+     * Intelligent Dual-Core Launcher:
+     * 1. Picks optimal engine (Sing-box for Hysteria2/TUIC/SS; Xray for VLESS/VMess/Trojan/WG).
+     * 2. If Xray fails while Auto-Failover pool is active (e.g. a broken backup node `proxy-2`),
+     *    automatically retries Xray with the primary node only so a bad backup node never blocks connect.
+     * 3. In CoreEnginePreference.AUTO mode, if the primary core still fails, automatically fails over
+     *    to the secondary core (Xray <-> Sing-box) seamlessly!
+     */
+    private suspend fun launchEngineWithDualCoreFallback(
+        app: V2VexApp,
+        profile: ServerProfile,
+        settings: AppSettings
+    ): EngineLaunchResult {
+        val primarySingBox = shouldUseSingBox(profile, settings)
+        val onCrash: (Int, String?) -> Unit = { exitCode, reason ->
+            val msg = if (!reason.isNullOrBlank()) "Core exited ($exitCode): $reason" else "Core exited ($exitCode)"
+            stopTunnel(msg)
+        }
+
+        // Attempt 1: Primary engine with full settings
+        var cfg = buildEngineConfig(app, profile, settings, primarySingBox, includeFailoverPool = true)
+        LogBuffer.i(
+            "VPN",
+            "Config ready (${cfg.length}B) | engine=${if (primarySingBox) "Sing-box" else "Xray"} | mode=${settings.coreEngine} | node='${profile.name}' (${profile.shortBadge()}) | routing=${settings.routingPreset} | blockQuic=${settings.blockQuic} | dialStrat=${settings.outboundDomainStrategy} | frag=${settings.fragment.enabled} | mux=${settings.mux.enabled}"
+        )
+        var (ok, status) = xrayProcess?.start(cfg, serviceScope, primarySingBox, onCrash)
+            ?: (false to "Core manager unavailable")
+        if (ok) return EngineLaunchResult(true, status, cfg, primarySingBox)
+        if (status == "Superseded" || status == "Superseded by newer start") {
+            return EngineLaunchResult(false, status, cfg, primarySingBox)
+        }
+
+        // Attempt 2: If Xray failed while Auto-Failover pool was enabled, retry Xray with primary node ONLY
+        if (!primarySingBox && settings.enableAutoFailover) {
+            LogBuffer.w("VPN", "Xray failed with Auto-Failover pool ($status) — retrying primary node '${profile.name}' alone")
+            cfg = buildEngineConfig(app, profile, settings, useSingBox = false, includeFailoverPool = false)
+            val retry = xrayProcess?.start(cfg, serviceScope, useSingBox = false, onCrash)
+                ?: (false to "Core manager unavailable")
+            ok = retry.first
+            status = retry.second
+            if (ok) return EngineLaunchResult(true, "$status (Primary-Only)", cfg, false)
+        }
+
+        // Attempt 3: In AUTO (Dual-Core) mode, seamlessly fail over to the secondary engine!
+        if (settings.coreEngine == CoreEnginePreference.AUTO && profile.protocol != ProxyProtocol.RAW_JSON) {
+            val fallbackSingBox = !primarySingBox
+            val fallbackName = if (fallbackSingBox) "Sing-box" else "Xray-core"
+            LogBuffer.w("VPN", "Auto Dual-Core: primary engine failed ($status) — switching automatically to $fallbackName!")
+            val fbCfg = buildEngineConfig(app, profile, settings, fallbackSingBox, includeFailoverPool = false)
+            val fbRes = xrayProcess?.start(fbCfg, serviceScope, fallbackSingBox, onCrash)
+                ?: (false to "Core manager unavailable")
+            if (fbRes.first) {
+                return EngineLaunchResult(true, "${fbRes.second} · Auto-Fallback", fbCfg, fallbackSingBox)
+            }
+            return EngineLaunchResult(false, "$status | Fallback $fallbackName: ${fbRes.second}", fbCfg, fallbackSingBox)
+        }
+
+        return EngineLaunchResult(false, status, cfg, primarySingBox)
+    }
+
     private fun shouldUseSingBox(profile: ServerProfile, settings: AppSettings): Boolean = when (settings.coreEngine) {
         CoreEnginePreference.SING_BOX -> true
         CoreEnginePreference.XRAY -> false
         CoreEnginePreference.AUTO ->
-            profile.protocol == ProxyProtocol.HYSTERIA2 || profile.protocol == ProxyProtocol.TUIC
+            profile.protocol == ProxyProtocol.HYSTERIA2 ||
+                profile.protocol == ProxyProtocol.TUIC ||
+                profile.protocol == ProxyProtocol.SHADOWSOCKS
     }
 
     private fun buildEngineConfig(
         app: V2VexApp,
         profile: ServerProfile,
         settings: AppSettings,
-        useSingBox: Boolean
+        useSingBox: Boolean,
+        includeFailoverPool: Boolean = true
     ): String {
         if (useSingBox) {
             return SingBoxConfigGenerator.generate(profile, settings)
         }
         val chainProfile = app.repository.getProfileById(settings.chainProfileId)
-        val failovers = if (settings.enableAutoFailover) {
+        val failovers = if (includeFailoverPool && settings.enableAutoFailover) {
             val selectedIds = settings.failoverNodeIds.toSet()
             val all = app.repository.profiles.value
             if (selectedIds.isNotEmpty()) {
@@ -270,33 +325,23 @@ class V2VexVpnService : VpnService() {
                 val profile = app.repository.getSelectedProfile() ?: return@withLock
                 val settings = app.repository.settings.value
                 try {
-                    val useSingBox = shouldUseSingBox(profile, settings)
-                    val configJson = buildEngineConfig(app, profile, settings, useSingBox)
-                    val (ok, coreStatus) = xrayProcess?.start(
-                        configJson = configJson,
-                        scope = serviceScope,
-                        useSingBox = useSingBox
-                    ) { exitCode, reason ->
-                        val msg = if (!reason.isNullOrBlank()) "Core exited ($exitCode): $reason" else "Core exited ($exitCode)"
-                        stopTunnel(msg)
-                    } ?: (false to "Core error")
-
-                    if (ok) {
-                        lastGoodConfigJson = configJson
-                        lastGoodUseSingBox = useSingBox
-                        lastGoodCoreStatus = coreStatus
+                    val launchRes = launchEngineWithDualCoreFallback(app, profile, settings)
+                    if (launchRes.ok) {
+                        lastGoodConfigJson = launchRes.configJson
+                        lastGoodUseSingBox = launchRes.useSingBox
+                        lastGoodCoreStatus = launchRes.status
                         VpnStateHolder.setConnected(
                             profileId = profile.id,
                             profileName = profile.name,
                             badge = profile.shortBadge(),
-                            coreMode = "$coreStatus · L3 TUN"
+                            coreMode = "${launchRes.status} · L3 TUN"
                         )
                         LogBuffer.i(
                             "VPN",
-                            "Hot-reloaded '${profile.name}' (engine=${if (useSingBox) "Sing-box" else "Xray"}, blockQuic=${settings.blockQuic}, dial=${settings.outboundDomainStrategy}, log=${settings.logLevel})"
+                            "Hot-reloaded '${profile.name}' (engine=${if (launchRes.useSingBox) "Sing-box" else "Xray"}, blockQuic=${settings.blockQuic}, dial=${settings.outboundDomainStrategy}, log=${settings.logLevel})"
                         )
-                    } else if (coreStatus != "Superseded" && coreStatus != "Superseded by newer start") {
-                        LogBuffer.w("VPN", "Hot-reload rejected ($coreStatus) — rolling back to last healthy config")
+                    } else if (launchRes.status != "Superseded" && launchRes.status != "Superseded by newer start") {
+                        LogBuffer.w("VPN", "Hot-reload rejected (${launchRes.status}) — rolling back to last healthy config")
                         val fallbackJson = lastGoodConfigJson
                         if (!fallbackJson.isNullOrBlank()) {
                             val (rolledBack, rbStatus) = xrayProcess?.start(
@@ -309,10 +354,10 @@ class V2VexVpnService : VpnService() {
                             if (rolledBack) {
                                 LogBuffer.i("VPN", "Rollback succeeded ($rbStatus) — tunnel preserved!")
                             } else {
-                                stopTunnel(coreStatus)
+                                stopTunnel(launchRes.status)
                             }
                         } else {
-                            stopTunnel(coreStatus)
+                            stopTunnel(launchRes.status)
                         }
                     }
                 } catch (t: Throwable) {

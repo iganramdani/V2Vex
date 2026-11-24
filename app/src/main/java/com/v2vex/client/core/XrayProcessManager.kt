@@ -92,15 +92,20 @@ class XrayProcessManager(
             if (exitedEarly) {
                 val code = runCatching { proc.exitValue() }.getOrDefault(-1)
                 // Give stdout reader a brief moment to drain the final fatal line
-                delay(60)
+                delay(80)
                 val reason = synchronized(startupLines) {
                     startupLines.lastOrNull {
-                        it.contains("failed", ignoreCase = true) ||
-                            it.contains("error", ignoreCase = true) ||
+                        it.contains("Failed to start", ignoreCase = true) ||
                             it.contains("FATAL", ignoreCase = true) ||
-                            it.contains("invalid", ignoreCase = true)
+                            it.contains("panic:", ignoreCase = true)
+                    } ?: startupLines.lastOrNull {
+                        !it.contains("[Warning]") && (
+                            it.contains("failed", ignoreCase = true) ||
+                                it.contains("invalid", ignoreCase = true) ||
+                                it.contains("error", ignoreCase = true)
+                            )
                     } ?: startupLines.lastOrNull()
-                }?.take(220)
+                }?.take(600)
                 val detail = if (!reason.isNullOrBlank()) " — $reason" else ""
                 LogBuffer.e("Core", "$engineName exited immediately (code $code)$detail")
                 stopInternal()

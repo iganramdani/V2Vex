@@ -160,8 +160,18 @@ fun SettingsScreen(
     var showRestoreDialog by remember { mutableStateOf(false) }
 
     val pm = remember { context.getSystemService(PowerManager::class.java) }
-    val batteryExempt = remember(coreInfo) {
-        pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+    var batteryExempt by remember {
+        mutableStateOf(pm?.isIgnoringBatteryOptimizations(context.packageName) == true)
+    }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                batteryExempt = pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     if (showAddRuleDialog || editingRule != null) {
@@ -246,34 +256,48 @@ fun SettingsScreen(
             fontWeight = FontWeight.Bold
         )
 
-        // MIUI / HyperOS / OEM Battery Saver Exemption Banner
-        if (!batteryExempt) {
+        // MIUI / HyperOS / OEM Battery Saver Exemption Banner (auto-hides on resume or when dismissed)
+        if (!batteryExempt && !settings.batteryBannerDismissed) {
             Surface(
-                onClick = {
-                    runCatching {
-                        val intent = Intent(
-                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                        context.startActivity(intent)
-                    }
-                },
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 border = BorderStroke(1.dp, XrayAmber.copy(alpha = 0.6f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         text = "Prevent Background Kill (MIUI / HyperOS / OEM)",
                         style = MaterialTheme.typography.titleMedium,
                         color = XrayAmber
                     )
                     Text(
-                        text = "Tap to exempt V2Vex from aggressive battery killing while screen is locked.",
+                        text = "Allow unrestricted background battery so Android/MIUI doesn't kill the tunnel when locked.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    val intent = Intent(
+                                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                    context.startActivity(intent)
+                                }
+                            }
+                        ) {
+                            Text("Open Settings")
+                        }
+                        TextButton(
+                            onClick = {
+                                onUpdateSettings { it.copy(batteryBannerDismissed = true) }
+                                onShowMessage("Battery reminder dismissed")
+                            }
+                        ) {
+                            Text("Already Set · Hide")
+                        }
+                    }
                 }
             }
         }

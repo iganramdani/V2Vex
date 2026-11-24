@@ -476,27 +476,47 @@ object XrayConfigGenerator {
         }
     }
 
+    private val validUtlsFingerprints = setOf(
+        "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"
+    )
+
     private fun buildStreamSettings(
         profile: ServerProfile,
         settings: AppSettings,
         dialerProxyTag: String?
     ): JsonObject = buildJsonObject {
         put("network", profile.transport.xrayName)
-        put("security", profile.security.xrayName)
+        val effectiveSecurity = if (profile.security == SecurityType.REALITY && profile.realityPublicKey.isBlank()) {
+            SecurityType.TLS
+        } else {
+            profile.security
+        }
+        put("security", effectiveSecurity.xrayName)
 
-        when (profile.security) {
+        val safeFingerprint = profile.fingerprint.trim().lowercase().takeIf { it in validUtlsFingerprints }
+
+        when (effectiveSecurity) {
             SecurityType.TLS -> {
                 putJsonObject("tlsSettings") {
                     if (profile.sni.isNotBlank()) put("serverName", profile.sni)
                     put("allowInsecure", profile.allowInsecure)
-                    if (profile.verifyPeerCertByName.isNotBlank()) {
+                    // Xray 26.x: only emit verifyPeerCertByName when allowInsecure is false
+                    if (!profile.allowInsecure && profile.verifyPeerCertByName.isNotBlank()) {
                         put("verifyPeerCertByName", profile.verifyPeerCertByName)
                     }
-                    if (profile.fingerprint.isNotBlank()) put("fingerprint", profile.fingerprint)
+                    if (!safeFingerprint.isNullOrBlank()) put("fingerprint", safeFingerprint)
                     if (profile.alpn.isNotBlank()) {
-                        putJsonArray("alpn") {
-                            profile.alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                                .forEach { add(it) }
+                        val alpns = profile.alpn.split(",")
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                            .let { list ->
+                                // HTTPUpgrade requires http/1.1; filter out h2 if mixed improperly
+                                if (profile.transport == TransportType.HTTPUPGRADE) {
+                                    list.filterNot { it.equals("h2", ignoreCase = true) }.ifEmpty { listOf("http/1.1") }
+                                } else list
+                            }
+                        if (alpns.isNotEmpty()) {
+                            putJsonArray("alpn") { alpns.forEach { add(it) } }
                         }
                     }
                 }
@@ -504,7 +524,7 @@ object XrayConfigGenerator {
             SecurityType.REALITY -> {
                 putJsonObject("realitySettings") {
                     put("serverName", profile.sni.ifBlank { profile.address })
-                    put("fingerprint", profile.fingerprint.ifBlank { "chrome" })
+                    put("fingerprint", safeFingerprint ?: "chrome")
                     put("publicKey", profile.realityPublicKey)
                     put("shortId", profile.realityShortId)
                     if (profile.realitySpiderX.isNotBlank()) put("spiderX", profile.realitySpiderX)

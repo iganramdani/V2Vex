@@ -231,7 +231,7 @@ object LogBuffer {
             systemBuffer.toList() to engineBuffer.toList()
         }
         val sb = StringBuilder()
-        sb.appendLine("===== V2VEX v3.0 REAL-TIME DIAGNOSTIC REPORT (.TXT) =====")
+        sb.appendLine("===== V2VEX v${BuildConfig.VERSION_NAME} REAL-TIME DIAGNOSTIC REPORT (.TXT) =====")
         sb.appendLine("Generated: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(Date())}")
         sb.appendLine("App: V2Vex ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         sb.appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
@@ -245,12 +245,19 @@ object LogBuffer {
             sb.appendLine("\n--- tproxy.yml ---")
             sb.appendLine(runCatching { tproxyFile.readText() }.getOrDefault("<unreadable>"))
         }
-        val cfgFile = File(context.filesDir, "config.json")
-        if (cfgFile.exists()) {
-            sb.appendLine("\n--- config.json (secrets redacted) ---")
-            val raw = runCatching { cfgFile.readText() }.getOrDefault("")
+        val xrayCfg = File(context.filesDir, "config.json")
+        val sbCfg = File(context.filesDir, "singbox.json")
+        val activeCfg = when {
+            sbCfg.exists() && xrayCfg.exists() -> if (sbCfg.lastModified() >= xrayCfg.lastModified()) sbCfg else xrayCfg
+            sbCfg.exists() -> sbCfg
+            xrayCfg.exists() -> xrayCfg
+            else -> null
+        }
+        if (activeCfg != null) {
+            sb.appendLine("\n--- ${activeCfg.name} (secrets redacted) ---")
+            val raw = runCatching { activeCfg.readText() }.getOrDefault("")
             val redacted = raw.replace(
-                Regex(""""(id|password|secretKey|publicKey|preSharedKey|private_key)"\s*:\s*"[^"]+""""),
+                Regex(""""(id|uuid|password|secretKey|publicKey|preSharedKey|private_key|peer_public_key)"\s*:\s*"[^"]+""""),
                 """"$1": "<REDACTED>""""
             )
             sb.appendLine(redacted)

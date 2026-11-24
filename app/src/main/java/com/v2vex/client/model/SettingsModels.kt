@@ -158,5 +158,6 @@ data class AppSettings(
     val customGeoRepo: String = "Loyalsoldier/v2ray-rules-dat",
 
     // UI
-    val themeMode: ThemeMode = ThemeMode.CYBER_DARK
+    val themeMode: ThemeMode = ThemeMode.CYBER_DARK,
+    val batteryBannerDismissed: Boolean = false
 )

@@ -180,6 +180,20 @@ class CoreManager(private val context: Context) {
             }
         }
 
+    suspend fun checkLatestSingBoxRelease(repo: String = "SagerNet/sing-box"): Result<RemoteReleaseInfo> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val abi = primaryAbi()
+                val desiredKeywords = when {
+                    abi.contains("arm64") -> listOf("android-arm64.tar.gz")
+                    abi.contains("armeabi") -> listOf("android-arm.tar.gz")
+                    abi.contains("x86_64") -> listOf("android-amd64.tar.gz")
+                    else -> listOf("android-arm64.tar.gz")
+                }
+                fetchGitHubRelease(repo, desiredKeywords)
+            }
+        }
+
     suspend fun downloadAndInstallXrayCore(
         release: RemoteReleaseInfo,
         onProgress: (Float, String) -> Unit

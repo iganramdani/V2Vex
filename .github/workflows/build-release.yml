@@ -67,7 +67,7 @@ jobs:
 
           TAG_NAME="${GITHUB_REF_NAME}"
           if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
-            TAG_NAME="v3.1.0-ci"
+            TAG_NAME="v3.2.0-ci"
           fi
           APK_NAME="V2Vex-${TAG_NAME}-arm64-v8a-release.apk"
 
@@ -100,14 +100,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" "${APK_NAME}" \
-            --title "V2Vex ${GITHUB_REF_NAME} — True Bundled Dual-Core (Xray + Sing-box) & Visual GeoSite Studio" \
-            --notes "## ⚪⚫ V2Vex ${GITHUB_REF_NAME} — True Bundled Dual-Core & Visual GeoSite Studio
+            --title "V2Vex ${GITHUB_REF_NAME} — True Auto Dual-Core Failover & MIUI Polish" \
+            --notes "## ⚪⚫ V2Vex ${GITHUB_REF_NAME} — True Auto Dual-Core Failover & MIUI Polish
 
-          ### 🔥 Fixed & Upgraded in ${GITHUB_REF_NAME} (Forensic Audit from Real Device \`logV2Vex.txt\`)
-          - 🚀 **Bundled Sing-box Core (\`libsingbox.so\` ${SINGBOX_VER})**: Sing-box now ships directly inside \`jniLibs\` (Android 10–15 W^X compliant, zero external plugin APK needed!) with full **Sing-box 1.12–1.14+ schema** (\`action: sniff\`, \`hijack-dns\`, \`reject\`, typed DoH DNS, QUIC Guard, NAT64 strategy).
-          - 🌍 **Visual GeoSite & GeoIP Rule Studio + 1-Tap Quick Packs**: Pure-Kotlin protobuf wire scanner reads ALL real tags directly from \`geosite.dat\` & \`geoip.dat\`! Toggle **Block Ads**, **Direct Indonesia**, **Proxy Streaming**, **Proxy AI & Dev**, or **Proxy Social** in 1 tap, or search & tap tags visually with zero typos.
-          - 🛡️ **Zero-Crash Hot-Reload + Automatic Rollback**: Serialized \`Mutex\` lifecycle + 450ms smart settings debounce + generation-guarded process manager completely eliminates exit-code-143/141 race kills and exit-code-23 invalid-tag/fragment crashes — automatically rolling back to the last healthy config if a rule fails!
-          - 🪵 **Pinned Fatal Stderr Capture**: Exact Xray / Sing-box startup error lines are now pinned straight into System Logs & exported \`.txt\` reports.
+          ### 🔥 Fixed in ${GITHUB_REF_NAME} (Forensic Audit from Real Device \`logV2Vex.txt\`)
+          - ⚡ **True Intelligent \`Auto (Dual-Core)\` Failover**: Automatically isolates broken Observatory backup nodes (retrying primary node cleanly) AND seamlessly fails over across engines (**Xray-core ↔ Sing-box**) whenever the primary core cannot launch a node!
+          - 🔄 **Unified Dual-Core \`Check Core\`**: Checks **XTLS/Xray-core** + **SagerNet/sing-box** + **V2Vex APK** together cleanly without wasting bandwidth downloading W^X-blocked binaries on Android 10–15.
+          - 🔋 **MIUI / HyperOS Battery Banner Fix**: Live \`ON_RESUME\` re-check + permanent **\"Already Set · Hide\"** button so Xiaomi/MIUI users who already enabled *Tanpa Batas* are never nagged again.
+          - 🛡️ **Xray 26.x StreamSettings Sanitizer**: Strict uTLS fingerprint allowlist, \`HTTPUpgrade\` ALPN \`http/1.1\` guard, \`REALITY\` blank-pubkey guard, and \`allowInsecure\` / \`verifyPeerCertByName\` mutual exclusion (fixes \`proxy-2\` code-23 config failures!).
+          - 🪵 **Upgraded \`.txt\` Diagnostic Report**: Dynamic version header, active \`singbox.json\` / \`config.json\` dump, and 600-char fatal stderr priority capture.
 
           ### 🙏 Respect & Attribution
           Powered by **XTLS/Xray-core** (\`${CORE_VER}\`), **SagerNet/sing-box** (\`${SINGBOX_VER}\`), **heiher/hev-socks5-tunnel**, and **Loyalsoldier/v2ray-rules-dat**. Full credits in [CREDITS.md](https://github.com/iganramdani/V2Vex/blob/main/CREDITS.md)."
