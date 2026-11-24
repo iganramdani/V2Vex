@@ -120,9 +120,19 @@ fun V2VexRoot(
                     .padding(innerPadding)
             ) {
                 if (showLogs) {
+                    val header = "VPN State: ${vpnSnapshot.state} (${vpnSnapshot.coreMode})\n" +
+                        "Core: ${coreInfo.installedVersion} | src=${coreInfo.binarySource} | exec=${coreInfo.executable}\n" +
+                        "GeoIP=${coreInfo.geoIpSizeBytes}B | GeoSite=${coreInfo.geoSiteSizeBytes}B\n" +
+                        "Active Node: ${selectedProfile?.name ?: "None"} (${selectedProfile?.shortBadge() ?: ""})"
                     LogsScreen(
+                        xrayLogLevel = settings.logLevel,
+                        extraReportHeader = header,
+                        onChangeXrayLogLevel = { lvl ->
+                            vm.updateSettings(hotReloadVpn = true) { it.copy(logLevel = lvl) }
+                            vm.emitMessage("Xray log level -> $lvl")
+                        },
                         onBack = { showLogs = false },
-                        onCopied = { vm.emitMessage("Logs copied to clipboard") }
+                        onMessage = { vm.emitMessage(it) }
                     )
                 } else {
                     when (currentTab) {
@@ -135,6 +145,7 @@ fun V2VexRoot(
                             onOpenNodes = { currentTab = RootTab.NODES },
                             onOpenSpeedLab = { currentTab = RootTab.SPEEDLAB },
                             onOpenCoreSettings = { currentTab = RootTab.SETTINGS },
+                            onOpenLogs = { showLogs = true },
                             onPingSelected = { vm.pingSelected() },
                             onToggleFragment = { vm.toggleFragment() },
                             onToggleMux = { vm.toggleMux() },

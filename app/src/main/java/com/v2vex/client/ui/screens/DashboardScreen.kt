@@ -74,6 +74,7 @@ fun DashboardScreen(
     onOpenNodes: () -> Unit,
     onOpenSpeedLab: () -> Unit,
     onOpenCoreSettings: () -> Unit,
+    onOpenLogs: () -> Unit,
     onPingSelected: () -> Unit,
     onToggleFragment: () -> Unit,
     onToggleMux: () -> Unit,
@@ -101,7 +102,7 @@ fun DashboardScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Top Header with Philosophy Badge & Core Pill
+        // Top Header with Philosophy Badge, 1-Tap Live Logs, & Core Pill
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -115,37 +116,53 @@ fun DashboardScreen(
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 Text(
-                    text = "99% Fast & Light · Xray Engine",
+                    text = "99% Fast & Light · L3 TUN",
                     style = MaterialTheme.typography.labelSmall,
                     color = XrayCyan
                 )
             }
 
-            Surface(
-                onClick = onOpenCoreSettings,
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                border = BorderStroke(
-                    1.dp,
-                    if (coreInfo.executable) XrayEmerald.copy(alpha = 0.5f) else XrayAmber.copy(alpha = 0.5f)
-                )
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    onClick = onOpenLogs,
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    border = BorderStroke(1.dp, XrayCyan.copy(alpha = 0.45f))
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(if (coreInfo.executable) XrayEmerald else XrayAmber)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (coreInfo.executable) "Core Ready" else "Install Core",
+                        text = "LIVE LOG",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = XrayCyan,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
+                }
+
+                Surface(
+                    onClick = onOpenCoreSettings,
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    border = BorderStroke(
+                        1.dp,
+                        if (coreInfo.executable) XrayEmerald.copy(alpha = 0.5f) else XrayAmber.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(if (coreInfo.executable) XrayEmerald else XrayAmber)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (coreInfo.executable) "Core OK" else "No Core",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
         }

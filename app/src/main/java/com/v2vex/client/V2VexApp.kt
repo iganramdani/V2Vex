@@ -25,6 +25,7 @@ class V2VexApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        LogBuffer.init(this)
         repository = AppRepository(this)
         coreManager = CoreManager(this)
         speedTestEngine = SpeedTestEngine()
@@ -33,7 +34,11 @@ class V2VexApp : Application() {
         repository.loadAsync()
         appScope.launch {
             coreManager.ensureBundledGeoAssets()
+            val info = coreManager.inspectInstalledCore()
+            LogBuffer.i(
+                "Core",
+                "Startup probe: ver='${info.installedVersion}' | src=${info.binarySource} | exec=${info.executable} | geoip=${info.geoIpSizeBytes}B | geosite=${info.geoSiteSizeBytes}B"
+            )
         }
-        LogBuffer.i("App", "V2Vex v1.1.0 initialized (99% Fast & Light)")
     }
 }

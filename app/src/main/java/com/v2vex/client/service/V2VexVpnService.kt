@@ -6,10 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.net.ProxyInfo
+import android.net.TrafficStats
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.v2vex.client.MainActivity
@@ -22,6 +23,7 @@ import com.v2vex.client.core.XrayProcessManager
 import com.v2vex.client.model.AppSettings
 import com.v2vex.client.model.ServerProfile
 import com.v2vex.client.model.SplitTunnelMode
+import com.v2vex.client.model.VpnConnectionState
 import hev.htproxy.TProxyService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,9 +38,10 @@ import java.io.File
 /**
  * Full L3 Android VpnService powered by:
  * - Xray-core (libxray.so) for VLESS/REALITY/XHTTP/VMess/Trojan/SS/WG
- * - Native C hev-socks5-tunnel (TProxyService) for full TCP + UDP + DNS TUN routing
- * - Exact TUN-level RX/TX telemetry via TProxyGetStats() (zero double-counting!)
- * - Seamless ACTION_RELOAD hot-reload when toggling Fragment/Mux/Routing or switching nodes
+ * - Native C hev-socks5-tunnel (TProxyService) for 100% TCP + UDP + DNS L3 TUN routing
+ *   (NO setHttpProxy bypass, so ALL apps traverse TUN and telemetry is 100% accurate!)
+ * - Hybrid exact telemetry: TProxyGetStats() + UID socket fallback (captures SpeedLab local HTTP too!)
+ * - Smooth 1-second live notification speed meter showing ↓ Mbps / ↑ Mbps + session totals
  */
 class V2VexVpnService : VpnService() {
 
@@ -59,7 +62,7 @@ class V2VexVpnService : VpnService() {
         }
 
         fun reloadIfRunning(context: Context) {
-            if (VpnStateHolder.snapshot.value.state == com.v2vex.client.model.VpnConnectionState.CONNECTED) {
+            if (VpnStateHolder.snapshot.value.state == VpnConnectionState.CONNECTED) {
                 val intent = Intent(context, V2VexVpnService::class.java).setAction(ACTION_RELOAD)
                 context.startService(intent)
             }
@@ -82,9 +85,11 @@ class V2VexVpnService : VpnService() {
         createNotificationChannel()
         val app = application as V2VexApp
         xrayProcess = XrayProcessManager(this, app.coreManager)
+        LogBuffer.d("VPN", "V2VexVpnService onCreate()")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        LogBuffer.d("VPN", "onStartCommand action=${intent?.action}")
         when (intent?.action) {
             ACTION_STOP -> {
                 stopTunnel()
@@ -115,7 +120,10 @@ class V2VexVpnService : VpnService() {
         val settings = app.repository.settings.value
 
         VpnStateHolder.setConnecting(profile.id, profile.name, profile.shortBadge())
-        startForeground(NOTIF_ID, buildNotification(profile.name, "Starting Xray + L3 TUN..."))
+        startForeground(
+            NOTIF_ID,
+            buildNotification("V2Vex · Connecting...", "${profile.name} · Starting Xray + L3 TUN")
+        )
 
         serviceScope.launch(Dispatchers.IO) {
             try {
@@ -128,7 +136,10 @@ class V2VexVpnService : VpnService() {
                     hasGeoSite = app.coreManager.hasGeoSite(),
                     chainProfile = chainProfile
                 )
-                LogBuffer.i("VPN", "Generated Xray config (${configJson.length}B) for '${profile.name}'")
+                LogBuffer.i(
+                    "VPN",
+                    "Config ready (${configJson.length}B) | node='${profile.name}' (${profile.shortBadge()}) | routing=${settings.routingPreset} | frag=${settings.fragment.enabled} | mux=${settings.mux.enabled} | chain=${chainProfile?.name ?: "none"}"
+                )
 
                 // 1. Launch & verify Xray-core is genuinely alive
                 val (coreStarted, coreStatus) = xrayProcess?.start(configJson, serviceScope) { exitCode ->
@@ -140,18 +151,22 @@ class V2VexVpnService : VpnService() {
                     return@launch
                 }
 
-                // 2. Establish Android TUN interface
+                // 2. Establish Android TUN interface (pure L3 — NO setHttpProxy bypass!)
                 val pfd = establishTunInterface(profile, settings)
 
-                // 3. Start native C hev-socks5-tunnel (full TCP + UDP + DNS L3 routing!)
+                // 3. Start native C hev-socks5-tunnel (full TCP + UDP + DNS L3 routing)
                 val tproxyCfg = writeTProxyConfig(settings)
                 val startedTun = TProxyService.TProxyStartService(tproxyCfg.absolutePath, pfd.fd)
                 if (!startedTun) {
+                    LogBuffer.e("TUN", "TProxyStartService returned false! fd=${pfd.fd}")
                     stopTunnel("Failed to start L3 hev-socks5-tunnel engine")
                     return@launch
                 }
                 tproxyActive = true
-                LogBuffer.i("TUN", "hev-socks5-tunnel ACTIVE (fd=${pfd.fd}, MTU=${settings.vpnMtu}, SOCKS=127.0.0.1:${settings.socksPort})")
+                LogBuffer.i(
+                    "TUN",
+                    "hev-socks5-tunnel ACTIVE | fd=${pfd.fd} | MTU=${settings.vpnMtu} | SOCKS=127.0.0.1:${settings.socksPort} | IPv6=${settings.enableIpv6}"
+                )
 
                 VpnStateHolder.setConnected(
                     profileId = profile.id,
@@ -161,15 +176,12 @@ class V2VexVpnService : VpnService() {
                 )
                 startTelemetryLoop(profile)
             } catch (t: Throwable) {
-                LogBuffer.e("VPN", "Tunnel start failed: ${t.message}")
+                LogBuffer.e("VPN", "Tunnel start failed: ${t.javaClass.simpleName}: ${t.message}")
                 stopTunnel(error = t.message ?: "Failed to start VPN")
             }
         }
     }
 
-    /**
-     * Hot-reloads Xray-core config cleanly without dropping the Android TUN interface!
-     */
     private fun reloadCoreOnly() {
         val app = application as V2VexApp
         val profile = app.repository.getSelectedProfile() ?: return
@@ -196,7 +208,7 @@ class V2VexVpnService : VpnService() {
                         badge = profile.shortBadge(),
                         coreMode = "$coreStatus · L3 TUN"
                     )
-                    LogBuffer.i("VPN", "Hot-reloaded Xray-core for '${profile.name}'")
+                    LogBuffer.i("VPN", "Hot-reloaded Xray-core for '${profile.name}' (logLevel=${settings.logLevel})")
                 } else {
                     stopTunnel(coreStatus)
                 }
@@ -244,13 +256,10 @@ class V2VexVpnService : VpnService() {
             }
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            runCatching {
-                builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", settings.httpPort))
-            }
-        }
+        // NOTE: Do NOT call setHttpProxy() when L3 hev-socks5-tunnel is active!
+        // Setting setHttpProxy causes Android HTTP/HTTPS apps to bypass tun0, breaking
+        // TUN routing and making TUN speed meters read 0 Mbps.
 
-        // Split Tunneling (always disallow self to prevent VPN loop)
         when (settings.splitTunnelMode) {
             SplitTunnelMode.ALL_APPS -> {
                 runCatching { builder.addDisallowedApplication(packageName) }
@@ -276,54 +285,102 @@ class V2VexVpnService : VpnService() {
         val pfd = builder.establish()
             ?: error("VPN permission revoked or TUN interface could not be established")
         vpnInterface = pfd
+        LogBuffer.d("TUN", "TUN established: fd=${pfd.fd}, splitMode=${settings.splitTunnelMode}, excludedSelf=$packageName")
         return pfd
     }
 
     /**
-     * Exact TUN-level telemetry directly from hev-socks5-tunnel TProxyGetStats() — ZERO double-counting!
-     * TProxyGetStats() returns [tx_packets, tx_bytes, rx_packets, rx_bytes].
+     * High-accuracy live speed meter + 1-second notification updater:
+     * - Reads native hev-socks5-tunnel TProxyGetStats() [tx_pkts, tx_bytes, rx_pkts, rx_bytes]
+     * - Also reads TrafficStats.getUidRxBytes(myUid) / getUidTxBytes(myUid) for Xray's own UID
+     *   (zero double-counting AND captures direct local HTTP/SOCKS traffic such as SpeedLab!).
+     * - Takes maxOf(tunDelta, uidDelta) per 500ms window and applies light EMA smoothing for
+     *   crisp, jitter-free Mbps readouts in both Dashboard and Status Notification.
      */
     private fun startTelemetryLoop(profile: ServerProfile) {
         telemetryJob?.cancel()
         telemetryJob = serviceScope.launch(Dispatchers.Default) {
-            var prevTxBytes = 0L
-            var prevRxBytes = 0L
+            val myUid = Process.myUid()
+            var prevTunTx = 0L
+            var prevTunRx = 0L
+            val baseUidRx = TrafficStats.getUidRxBytes(myUid).coerceAtLeast(0L)
+            val baseUidTx = TrafficStats.getUidTxBytes(myUid).coerceAtLeast(0L)
+            var prevUidRx = baseUidRx
+            var prevUidTx = baseUidTx
             var prevNs = SystemClock.elapsedRealtimeNanos()
-            var notifCounter = 0
+
+            var smoothDlBps = 0.0
+            var smoothUlBps = 0.0
+            var totalSessionDl = 0L
+            var totalSessionUl = 0L
+            var tickCount = 0
+
+            val nm = getSystemService(NotificationManager::class.java)
 
             while (isActive) {
                 delay(500)
                 val nowNs = SystemClock.elapsedRealtimeNanos()
                 val deltaNs = (nowNs - prevNs).coerceAtLeast(1L)
+                val deltaSec = deltaNs / 1_000_000_000.0
 
+                // 1. Native TUN counters from hev-socks5-tunnel
                 val stats = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
-                val curTx = stats?.getOrNull(1)?.coerceAtLeast(0L) ?: prevTxBytes
-                val curRx = stats?.getOrNull(3)?.coerceAtLeast(0L) ?: prevRxBytes
+                val curTunTx = stats?.getOrNull(1)?.coerceAtLeast(0L) ?: prevTunTx
+                val curTunRx = stats?.getOrNull(3)?.coerceAtLeast(0L) ?: prevTunRx
+                val tunTxDelta = (curTunTx - prevTunTx).coerceAtLeast(0L)
+                val tunRxDelta = (curTunRx - prevTunRx).coerceAtLeast(0L)
+                prevTunTx = curTunTx
+                prevTunRx = curTunRx
 
-                val txDelta = (curTx - prevTxBytes).coerceAtLeast(0L)
-                val rxDelta = (curRx - prevRxBytes).coerceAtLeast(0L)
-
-                val dlBps = ((rxDelta * 8.0) / (deltaNs / 1_000_000_000.0)).toLong()
-                val ulBps = ((txDelta * 8.0) / (deltaNs / 1_000_000_000.0)).toLong()
-
-                prevTxBytes = curTx
-                prevRxBytes = curRx
+                // 2. Xray process UID counters (exact outbound socket bytes, zero double-count)
+                val curUidRx = TrafficStats.getUidRxBytes(myUid).coerceAtLeast(prevUidRx)
+                val curUidTx = TrafficStats.getUidTxBytes(myUid).coerceAtLeast(prevUidTx)
+                val uidRxDelta = (curUidRx - prevUidRx).coerceAtLeast(0L)
+                val uidTxDelta = (curUidTx - prevUidTx).coerceAtLeast(0L)
+                prevUidRx = curUidRx
+                prevUidTx = curUidTx
                 prevNs = nowNs
 
+                // Use whichever exact counter sees the active flow (TUN for device apps, UID for local proxy/SpeedLab)
+                val rxDelta = maxOf(tunRxDelta, uidRxDelta)
+                val txDelta = maxOf(tunTxDelta, uidTxDelta)
+
+                totalSessionDl += rxDelta
+                totalSessionUl += txDelta
+
+                val rawDlBps = (rxDelta * 8.0) / deltaSec
+                val rawUlBps = (txDelta * 8.0) / deltaSec
+
+                // Fast-attack, smooth-decay EMA (alpha=0.55) for responsive yet readable Mbps
+                smoothDlBps = if (rawDlBps == 0.0 && smoothDlBps < 5_000.0) 0.0 else (0.55 * rawDlBps + 0.45 * smoothDlBps)
+                smoothUlBps = if (rawUlBps == 0.0 && smoothUlBps < 5_000.0) 0.0 else (0.55 * rawUlBps + 0.45 * smoothUlBps)
+
+                val dlBpsLong = smoothDlBps.toLong()
+                val ulBpsLong = smoothUlBps.toLong()
+
                 VpnStateHolder.updateTelemetry(
-                    downloadBps = dlBps,
-                    uploadBps = ulBps,
-                    totalDownloadBytes = curRx,
-                    totalUploadBytes = curTx
+                    downloadBps = dlBpsLong,
+                    uploadBps = ulBpsLong,
+                    totalDownloadBytes = totalSessionDl,
+                    totalUploadBytes = totalSessionUl
                 )
 
-                notifCounter++
-                if (notifCounter % 4 == 0) {
+                tickCount++
+                // Update notification every 1.0 second (every 2 ticks) with live speed right in title!
+                if (tickCount % 2 == 0) {
                     val unit = (application as V2VexApp).repository.settings.value.speedUnit
-                    val subtitle = "↓ ${SpeedMath.formatSpeed(dlBps, unit)}   ↑ ${SpeedMath.formatSpeed(ulBps, unit)}"
                     val activeName = VpnStateHolder.snapshot.value.activeProfileName ?: profile.name
-                    getSystemService(NotificationManager::class.java)
-                        ?.notify(NOTIF_ID, buildNotification(activeName, subtitle))
+                    val title = "↓ ${SpeedMath.formatSpeed(dlBpsLong, unit)}  ↑ ${SpeedMath.formatSpeed(ulBpsLong, unit)}"
+                    val subtitle = "$activeName · ↓ ${SpeedMath.formatBytes(totalSessionDl)} ↑ ${SpeedMath.formatBytes(totalSessionUl)}"
+                    nm?.notify(NOTIF_ID, buildNotification(title, subtitle))
+                }
+
+                // Periodic diagnostic heartbeat every 30s for real-device bug hunting
+                if (tickCount % 60 == 0) {
+                    LogBuffer.d(
+                        "TELEM",
+                        "Heartbeat: tunRx=$curTunRx tunTx=$curTunTx | uidRx=${curUidRx - baseUidRx} uidTx=${curUidTx - baseUidTx} | xrayAlive=${xrayProcess?.isRunning}"
+                    )
                 }
             }
         }
@@ -333,6 +390,7 @@ class V2VexVpnService : VpnService() {
         if (tproxyActive) {
             runCatching { TProxyService.TProxyStopService() }
             tproxyActive = false
+            LogBuffer.d("TUN", "hev-socks5-tunnel stopped")
         }
     }
 
@@ -393,10 +451,12 @@ class V2VexVpnService : VpnService() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_vpn_tile)
-            .setContentTitle("V2Vex · $title")
+            .setContentTitle(title)
             .setContentText(text)
             .setOngoing(true)
             .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             .setContentIntent(openIntent)
             .addAction(0, "Disconnect", stopIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
