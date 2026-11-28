@@ -73,8 +73,10 @@ private enum class LogTab(val label: String) {
 @Composable
 fun LogsScreen(
     xrayLogLevel: String,
+    strictPrivacy: Boolean,
     extraReportHeader: String,
     onChangeXrayLogLevel: (String) -> Unit,
+    onToggleStrictPrivacy: (Boolean) -> Unit,
     onQuickDomainRule: (domain: String, target: RuleTarget) -> Unit,
     onBack: () -> Unit,
     onMessage: (String) -> Unit
@@ -94,7 +96,7 @@ fun LogsScreen(
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         runCatching {
-            val report = LogBuffer.buildFullBugReport(context, extraReportHeader)
+            val report = LogBuffer.buildFullBugReport(context, extraReportHeader, strictPrivacy)
             context.contentResolver.openOutputStream(uri)?.use { out ->
                 out.write(report.toByteArray(Charsets.UTF_8))
             }
@@ -106,7 +108,7 @@ fun LogsScreen(
 
     fun shareTxtFile() {
         runCatching {
-            val txtFile = LogBuffer.exportTxtReportFile(context, extraReportHeader)
+            val txtFile = LogBuffer.exportTxtReportFile(context, extraReportHeader, strictPrivacy)
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
@@ -225,7 +227,7 @@ fun LogsScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Mode Tabs: All | System (Pinned) | Live Connections Firewall
+        // Mode Tabs: All | System (Pinned) | Live Connections Firewall + Strict Privacy Redaction
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -242,6 +244,11 @@ fun LogsScreen(
                     }
                 )
             }
+            FilterChip(
+                selected = strictPrivacy,
+                onClick = { onToggleStrictPrivacy(!strictPrivacy) },
+                label = { Text(if (strictPrivacy) "Strict Privacy: ON" else "Strict Privacy: OFF") }
+            )
         }
 
         if (activeTab == LogTab.FIREWALL) {

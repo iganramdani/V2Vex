@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import com.v2vex.client.MainActivity
 import com.v2vex.client.R
 import com.v2vex.client.V2VexApp
+import com.v2vex.client.core.LatencyTester
 import com.v2vex.client.core.LogBuffer
 import com.v2vex.client.core.SingBoxConfigGenerator
 import com.v2vex.client.core.SpeedLabTrafficCounter
@@ -92,6 +93,7 @@ class V2VexVpnService : VpnService() {
     @Volatile private var lastGoodConfigJson: String? = null
     @Volatile private var lastGoodUseSingBox: Boolean = false
     @Volatile private var lastGoodCoreStatus: String = ""
+    @Volatile private var runtimeFailoverAttempted: Boolean = false
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -115,7 +117,7 @@ class V2VexVpnService : VpnService() {
         createNotificationChannel()
         val app = application as V2VexApp
         xrayProcess = XrayProcessManager(this, app.coreManager)
-        LogBuffer.d("VPN", "V2VexVpnService v3.0 ready")
+        LogBuffer.d("VPN", "V2VexVpnService v3.3 ready")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -146,7 +148,19 @@ class V2VexVpnService : VpnService() {
             stopSelf()
             return
         }
-        val settings = app.repository.settings.value
+        // Issue #8: Auto-reset debug log level back to warning after 30 minutes
+        val initialSettings = app.repository.settings.value
+        val settings = if (
+            initialSettings.logLevel == "debug" &&
+            initialSettings.debugLogEnabledAtMs > 0L &&
+            System.currentTimeMillis() - initialSettings.debugLogEnabledAtMs > 30L * 60L * 1000L
+        ) {
+            app.repository.updateSettings { it.copy(logLevel = "warning", debugLogEnabledAtMs = 0L) }
+            LogBuffer.i("VPN", "Auto-reset debug log level -> warning after 30 minutes")
+            app.repository.settings.value
+        } else {
+            initialSettings
+        }
 
         VpnStateHolder.setConnecting(profile.id, profile.name, profile.shortBadge())
         startForeground(
@@ -157,6 +171,7 @@ class V2VexVpnService : VpnService() {
         serviceScope.launch(Dispatchers.IO) {
             lifecycleMutex.withLock {
                 try {
+                    runtimeFailoverAttempted = false
                     app.coreManager.ensureBundledGeoAssets()
                     val launchRes = launchEngineWithDualCoreFallback(app, profile, settings)
                     if (!launchRes.ok) {
@@ -206,24 +221,76 @@ class V2VexVpnService : VpnService() {
         val useSingBox: Boolean
     )
 
+    private fun handleUnexpectedEngineExit(exitCode: Int, reason: String?) {
+        serviceScope.launch(Dispatchers.IO) {
+            lifecycleMutex.withLock {
+                val msg = if (!reason.isNullOrBlank()) "Core exited ($exitCode): $reason" else "Core exited ($exitCode)"
+                val app = application as V2VexApp
+                val profile = app.repository.getSelectedProfile()
+                val settings = app.repository.settings.value
+
+                // Issue #4 & #12: Mutex-guarded runtime crash failover in AUTO (Dual-Core) mode
+                if (
+                    tproxyActive &&
+                    profile != null &&
+                    settings.coreEngine == CoreEnginePreference.AUTO &&
+                    profile.protocol != ProxyProtocol.RAW_JSON &&
+                    !runtimeFailoverAttempted
+                ) {
+                    val altSingBox = !lastGoodUseSingBox
+                    val altName = if (altSingBox) "Sing-box" else "Xray-core"
+                    if (altSingBox && SingBoxConfigGenerator.requiresUnsupportedSafeSniSpoof(profile)) {
+                        LogBuffer.w(
+                            "VPN",
+                            "Refused runtime Sing-box failover: Safe SNI Spoofing (verifyPeerCertByName) requires Xray-core to preserve TLS verification."
+                        )
+                    } else {
+                        runtimeFailoverAttempted = true
+                        LogBuffer.w("VPN", "Runtime crash ($msg) — failing over in-place to $altName!")
+                        val fbCfg = buildEngineConfig(app, profile, settings, altSingBox, includeFailoverPool = false)
+                        val fbRes = xrayProcess?.start(fbCfg, serviceScope, altSingBox, ::handleUnexpectedEngineExit)
+                            ?: (false to "Core manager unavailable")
+                        if (fbRes.first) {
+                            lastGoodConfigJson = fbCfg
+                            lastGoodUseSingBox = altSingBox
+                            lastGoodCoreStatus = "${fbRes.second} · Runtime-Failover"
+                            VpnStateHolder.setConnected(
+                                profileId = profile.id,
+                                profileName = profile.name,
+                                badge = profile.shortBadge(),
+                                coreMode = "${lastGoodCoreStatus} · L3 TUN"
+                            )
+                            LogBuffer.i("VPN", "Runtime failover to $altName succeeded — TUN preserved!")
+                            return@withLock
+                        }
+                    }
+                }
+                stopTunnel(msg)
+            }
+        }
+    }
+
     /**
-     * Intelligent Dual-Core Launcher:
-     * 1. Picks optimal engine (Sing-box for Hysteria2/TUIC/SS; Xray for VLESS/VMess/Trojan/WG).
-     * 2. If Xray fails while Auto-Failover pool is active (e.g. a broken backup node `proxy-2`),
-     *    automatically retries Xray with the primary node only so a bad backup node never blocks connect.
-     * 3. In CoreEnginePreference.AUTO mode, if the primary core still fails, automatically fails over
-     *    to the secondary core (Xray <-> Sing-box) seamlessly!
+     * Intelligent Dual-Core Launcher (Issues #2, #3, #4):
+     * 1. Enforces Safe SNI Spoofing TLS security (never silently downgrades verifyPeerCertByName to insecure=true on Sing-box).
+     * 2. Picks optimal engine (Sing-box for Hysteria2/TUIC; Xray for VLESS/VMess/Trojan/WG and SS with Xray-only features).
+     * 3. If Xray fails with Auto-Failover pool active, retries primary node alone.
+     * 4. In AUTO mode, verifies post-connect HTTP 204 health (when autoHealthFallback=true) and fails over to the alternate engine if primary fails startup OR handshake.
      */
     private suspend fun launchEngineWithDualCoreFallback(
         app: V2VexApp,
         profile: ServerProfile,
         settings: AppSettings
     ): EngineLaunchResult {
-        val primarySingBox = shouldUseSingBox(profile, settings)
-        val onCrash: (Int, String?) -> Unit = { exitCode, reason ->
-            val msg = if (!reason.isNullOrBlank()) "Core exited ($exitCode): $reason" else "Core exited ($exitCode)"
-            stopTunnel(msg)
+        val unsafeForSingBox = SingBoxConfigGenerator.requiresUnsupportedSafeSniSpoof(profile)
+        if (settings.coreEngine == CoreEnginePreference.SING_BOX && unsafeForSingBox) {
+            val msg = "Safe SNI Spoofing (verifyPeerCertByName) requires Xray-core when allowInsecure=false. Switch Core Engine to Xray or Auto."
+            LogBuffer.e("VPN", msg)
+            return EngineLaunchResult(false, msg, "", true)
         }
+
+        val primarySingBox = shouldUseSingBox(profile, settings) && !unsafeForSingBox
+        val onCrash: (Int, String?) -> Unit = ::handleUnexpectedEngineExit
 
         // Attempt 1: Primary engine with full settings
         var cfg = buildEngineConfig(app, profile, settings, primarySingBox, includeFailoverPool = true)
@@ -233,7 +300,38 @@ class V2VexVpnService : VpnService() {
         )
         var (ok, status) = xrayProcess?.start(cfg, serviceScope, primarySingBox, onCrash)
             ?: (false to "Core manager unavailable")
-        if (ok) return EngineLaunchResult(true, status, cfg, primarySingBox)
+
+        if (ok) {
+            // Issue #4: Lightweight post-connect health probe in AUTO mode
+            if (shouldRunHealthFallback(profile, settings, primarySingBox, unsafeForSingBox)) {
+                val probeMs = runProxyHealthProbe(settings)
+                if (probeMs > 0) {
+                    LogBuffer.i("VPN", "Post-connect health probe OK (${probeMs}ms)")
+                    return EngineLaunchResult(true, status, cfg, primarySingBox)
+                }
+                val fallbackSingBox = !primarySingBox
+                val fallbackName = if (fallbackSingBox) "Sing-box" else "Xray-core"
+                LogBuffer.w("VPN", "Auto Dual-Core: primary engine failed HTTP 204 health probe — testing $fallbackName...")
+                val fbCfg = buildEngineConfig(app, profile, settings, fallbackSingBox, includeFailoverPool = false)
+                val fbRes = xrayProcess?.start(fbCfg, serviceScope, fallbackSingBox, onCrash)
+                    ?: (false to "Core manager unavailable")
+                if (fbRes.first) {
+                    val fbProbeMs = runProxyHealthProbe(settings)
+                    if (fbProbeMs > 0) {
+                        LogBuffer.i("VPN", "Auto Dual-Core: $fallbackName passed health probe (${fbProbeMs}ms)!")
+                        return EngineLaunchResult(true, "${fbRes.second} · Health-Fallback", fbCfg, fallbackSingBox)
+                    }
+                    LogBuffer.w("VPN", "Auto Dual-Core: $fallbackName also failed health probe — restoring primary engine")
+                }
+                // Restore primary engine so user still has tunnel up if probe URL itself is blocked
+                val restored = xrayProcess?.start(cfg, serviceScope, primarySingBox, onCrash)
+                    ?: (false to "Restore failed")
+                if (restored.first) {
+                    return EngineLaunchResult(true, status, cfg, primarySingBox)
+                }
+            }
+            return EngineLaunchResult(true, status, cfg, primarySingBox)
+        }
         if (status == "Superseded" || status == "Superseded by newer start") {
             return EngineLaunchResult(false, status, cfg, primarySingBox)
         }
@@ -249,9 +347,16 @@ class V2VexVpnService : VpnService() {
             if (ok) return EngineLaunchResult(true, "$status (Primary-Only)", cfg, false)
         }
 
-        // Attempt 3: In AUTO (Dual-Core) mode, seamlessly fail over to the secondary engine!
+        // Attempt 3: In AUTO (Dual-Core) mode, seamlessly fail over to the secondary engine (respecting TLS security!)
         if (settings.coreEngine == CoreEnginePreference.AUTO && profile.protocol != ProxyProtocol.RAW_JSON) {
             val fallbackSingBox = !primarySingBox
+            if (fallbackSingBox && unsafeForSingBox) {
+                LogBuffer.w(
+                    "VPN",
+                    "Refused Auto-Fallback to Sing-box: Safe SNI Spoofing (verifyPeerCertByName) requires Xray-core to keep TLS verification enabled (allowInsecure=false)."
+                )
+                return EngineLaunchResult(false, "$status (Sing-box fallback blocked to protect TLS verification)", cfg, primarySingBox)
+            }
             val fallbackName = if (fallbackSingBox) "Sing-box" else "Xray-core"
             LogBuffer.w("VPN", "Auto Dual-Core: primary engine failed ($status) — switching automatically to $fallbackName!")
             val fbCfg = buildEngineConfig(app, profile, settings, fallbackSingBox, includeFailoverPool = false)
@@ -266,13 +371,54 @@ class V2VexVpnService : VpnService() {
         return EngineLaunchResult(false, status, cfg, primarySingBox)
     }
 
+    private fun shouldRunHealthFallback(
+        profile: ServerProfile,
+        settings: AppSettings,
+        primarySingBox: Boolean,
+        unsafeForSingBox: Boolean
+    ): Boolean {
+        if (!settings.autoHealthFallback) return false
+        if (settings.coreEngine != CoreEnginePreference.AUTO) return false
+        if (profile.protocol == ProxyProtocol.RAW_JSON) return false
+        // Hysteria2/TUIC are Sing-box-only; Xray cannot run them
+        if (profile.protocol == ProxyProtocol.HYSTERIA2 || profile.protocol == ProxyProtocol.TUIC) return false
+        // Do not probe fallback to Sing-box if Safe SNI Spoofing forbids Sing-box
+        if (!primarySingBox && unsafeForSingBox) return false
+        return true
+    }
+
+    private suspend fun runProxyHealthProbe(settings: AppSettings): Int {
+        val useAuth = settings.allowLan && settings.lanProxyUsername.isNotBlank() && settings.lanProxyPassword.isNotBlank()
+        return LatencyTester.testRealProxyDelay(
+            httpProxyPort = settings.httpPort,
+            probeUrl = settings.speedTest.pingUrl.ifBlank { "https://www.gstatic.com/generate_204" },
+            timeoutMs = 3500,
+            proxyUser = if (useAuth) settings.lanProxyUsername else "",
+            proxyPassword = if (useAuth) settings.lanProxyPassword else ""
+        )
+    }
+
+    private fun hasXrayOnlyFeaturesEnabled(settings: AppSettings): Boolean {
+        val hasGeoRules = settings.routingPreset == com.v2vex.client.model.RoutingPreset.ADBLOCK_BYPASS_LAN ||
+            settings.customRules.any { rule ->
+                rule.enabled && (rule.values.contains("geosite:", ignoreCase = true) || rule.values.contains("geoip:", ignoreCase = true))
+            }
+        return settings.fragment.enabled ||
+            settings.mux.enabled ||
+            settings.enableAutoFailover ||
+            settings.dns.enableFakeDns ||
+            hasGeoRules
+    }
+
     private fun shouldUseSingBox(profile: ServerProfile, settings: AppSettings): Boolean = when (settings.coreEngine) {
         CoreEnginePreference.SING_BOX -> true
         CoreEnginePreference.XRAY -> false
-        CoreEnginePreference.AUTO ->
-            profile.protocol == ProxyProtocol.HYSTERIA2 ||
-                profile.protocol == ProxyProtocol.TUIC ||
-                profile.protocol == ProxyProtocol.SHADOWSOCKS
+        CoreEnginePreference.AUTO -> when (profile.protocol) {
+            ProxyProtocol.HYSTERIA2, ProxyProtocol.TUIC -> true
+            // Issue #3: Keep Shadowsocks on Xray in AUTO mode when Xray-only features are enabled
+            ProxyProtocol.SHADOWSOCKS -> !hasXrayOnlyFeaturesEnabled(settings)
+            else -> false
+        }
     }
 
     private fun buildEngineConfig(
@@ -282,10 +428,10 @@ class V2VexVpnService : VpnService() {
         useSingBox: Boolean,
         includeFailoverPool: Boolean = true
     ): String {
-        if (useSingBox) {
-            return SingBoxConfigGenerator.generate(profile, settings)
-        }
         val chainProfile = app.repository.getProfileById(settings.chainProfileId)
+        if (useSingBox) {
+            return SingBoxConfigGenerator.generate(profile, settings, chainProfile = chainProfile)
+        }
         val failovers = if (includeFailoverPool && settings.enableAutoFailover) {
             val selectedIds = settings.failoverNodeIds.toSet()
             val all = app.repository.profiles.value
@@ -325,6 +471,7 @@ class V2VexVpnService : VpnService() {
                 val profile = app.repository.getSelectedProfile() ?: return@withLock
                 val settings = app.repository.settings.value
                 try {
+                    runtimeFailoverAttempted = false
                     val launchRes = launchEngineWithDualCoreFallback(app, profile, settings)
                     if (launchRes.ok) {
                         lastGoodConfigJson = launchRes.configJson
@@ -347,10 +494,9 @@ class V2VexVpnService : VpnService() {
                             val (rolledBack, rbStatus) = xrayProcess?.start(
                                 configJson = fallbackJson,
                                 scope = serviceScope,
-                                useSingBox = lastGoodUseSingBox
-                            ) { exitCode, reason ->
-                                stopTunnel("Core exited ($exitCode)${reason?.let { ": $it" } ?: ""}")
-                            } ?: (false to "Rollback failed")
+                                useSingBox = lastGoodUseSingBox,
+                                onUnexpectedExit = ::handleUnexpectedEngineExit
+                            ) ?: (false to "Rollback failed")
                             if (rolledBack) {
                                 LogBuffer.i("VPN", "Rollback succeeded ($rbStatus) — tunnel preserved!")
                             } else {
@@ -370,6 +516,12 @@ class V2VexVpnService : VpnService() {
     private fun writeTProxyConfig(settings: AppSettings): File {
         val mtu = settings.vpnMtu.coerceIn(1280, 9000)
         val ipv6Line = if (settings.enableIpv6) "  ipv6: 'fd99:2026::1'\n" else ""
+        val useAuth = settings.allowLan && settings.lanProxyUsername.isNotBlank() && settings.lanProxyPassword.isNotBlank()
+        val authLines = if (useAuth) {
+            val u = settings.lanProxyUsername.replace("'", "''")
+            val p = settings.lanProxyPassword.replace("'", "''")
+            "  username: '$u'\n  password: '$p'\n"
+        } else ""
         val yaml = """
             tunnel:
               mtu: $mtu
@@ -378,7 +530,7 @@ class V2VexVpnService : VpnService() {
               port: ${settings.socksPort}
               address: 127.0.0.1
               udp: 'udp'
-            misc:
+            ${authLines}misc:
               task-stack-size: 81920
               connect-timeout: 5000
               read-write-timeout: 60000
@@ -434,9 +586,10 @@ class V2VexVpnService : VpnService() {
     }
 
     /**
-     * Exact Zero-Loopback Speed Meter (calibrated from real Xiaomi Redmi Note 9 forensic telemetry):
-     * - Reads ONLY pure L3 TUN packets from TProxyService.TProxyGetStats() [txPkts, txBytes, rxPkts, rxBytes]
-     *   PLUS in-app SpeedLabTrafficCounter (eliminates 100% of Android eBPF 127.0.0.1 loopback 2.6x-7.3x inflation!).
+     * Pure L3 TUN Speed Meter (verified against heiher/hev-socks5-tunnel src/hev-jni.c & hev-socks5-tunnel.c):
+     * - TProxyGetStats() returns [0]=txPackets, [1]=txBytes (hev_tunnel_read = app upload),
+     *   [2]=rxPackets, [3]=rxBytes (hev_tunnel_write = app download), eliminating Android eBPF 127.0.0.1 loopback inflation.
+     * - Combined with in-app SpeedLabTrafficCounter for direct/proxied SpeedLab measurements.
      * - Screen-State Power Saver: when screen is off (!pm.isInteractive), skips SystemUI notification updates
      *   and relaxes polling to 2500ms for near-0% idle battery drain.
      */

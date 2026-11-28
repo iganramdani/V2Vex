@@ -134,17 +134,27 @@ fun V2VexRoot(
                     .padding(innerPadding)
             ) {
                 if (showLogs) {
+                    val nodeLabel = if (settings.strictLogRedaction) {
+                        "${selectedProfile?.shortBadge() ?: "None"} (name/host redacted)"
+                    } else {
+                        "${selectedProfile?.name ?: "None"} (${selectedProfile?.shortBadge() ?: ""})"
+                    }
                     val header = "VPN State: ${vpnSnapshot.state} (${vpnSnapshot.coreMode})\n" +
                         "Xray: ${coreInfo.installedVersion} | src=${coreInfo.binarySource} | exec=${coreInfo.executable}\n" +
                         "Sing-box: ${coreInfo.singBoxVersion} | src=${coreInfo.singBoxSource} | exec=${coreInfo.singBoxExecutable}\n" +
                         "GeoIP=${coreInfo.geoIpSizeBytes}B (${geoIpTags.size} tags) | GeoSite=${coreInfo.geoSiteSizeBytes}B (${geoSiteTags.size} tags)\n" +
-                        "Active Node: ${selectedProfile?.name ?: "None"} (${selectedProfile?.shortBadge() ?: ""})"
+                        "Active Node: $nodeLabel"
                     LogsScreen(
                         xrayLogLevel = settings.logLevel,
+                        strictPrivacy = settings.strictLogRedaction,
                         extraReportHeader = header,
-                        onChangeXrayLogLevel = { lvl ->
-                            vm.updateSettings(hotReloadVpn = true) { it.copy(logLevel = lvl) }
-                            vm.emitMessage("Core log level -> $lvl")
+                        onChangeXrayLogLevel = { lvl -> vm.setLogLevel(lvl) },
+                        onToggleStrictPrivacy = { enabled ->
+                            vm.updateSettings(hotReloadVpn = false) { it.copy(strictLogRedaction = enabled) }
+                            vm.emitMessage(
+                                if (enabled) "Strict Privacy Redaction ON (hosts/SNI/paths masked)"
+                                else "Standard Redaction (secrets only)"
+                            )
                         },
                         onQuickDomainRule = { domain, target -> vm.addQuickDomainRule(domain, target) },
                         onBack = { showLogs = false },
@@ -209,6 +219,8 @@ fun V2VexRoot(
                             coreInfo = coreInfo,
                             geoSiteTags = geoSiteTags,
                             geoIpTags = geoIpTags,
+                            isVpnConnected = vpnSnapshot.state == VpnConnectionState.CONNECTED,
+                            activeCoreMode = vpnSnapshot.coreMode,
                             coreUpdateBusy = coreUpdateBusy,
                             coreUpdateProgress = coreUpdateProgress,
                             coreUpdateStatus = coreUpdateStatus,

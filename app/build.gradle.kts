@@ -13,12 +13,21 @@ android {
         applicationId = "com.v2vex.client"
         minSdk = 29
         targetSdk = 35
-        versionCode = 7
-        versionName = "3.2.0"
+        versionCode = 8
+        versionName = "3.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = true
         }
     }
 

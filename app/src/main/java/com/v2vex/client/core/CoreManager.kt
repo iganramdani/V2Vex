@@ -30,6 +30,59 @@ import java.util.zip.ZipInputStream
  */
 class CoreManager(private val context: Context) {
 
+    enum class VersionCompareState {
+        UP_TO_DATE,
+        UPDATE_AVAILABLE,
+        UNKNOWN
+    }
+
+    companion object {
+        private val semVerRegex = Regex("""v?(\d+(?:\.\d+){1,3})""")
+
+        fun extractVersionParts(raw: String): List<Int>? {
+            val match = semVerRegex.find(raw) ?: return null
+            return match.groupValues[1].split(".").mapNotNull { it.toIntOrNull() }.takeIf { it.isNotEmpty() }
+        }
+
+        fun extractShortVersion(raw: String): String {
+            val match = semVerRegex.find(raw) ?: return raw.trim()
+            return "v${match.groupValues[1]}"
+        }
+
+        fun compareVersionTags(installedRaw: String, latestTag: String): VersionCompareState {
+            val cur = extractVersionParts(installedRaw) ?: return VersionCompareState.UNKNOWN
+            val latest = extractVersionParts(latestTag) ?: return VersionCompareState.UNKNOWN
+            val maxLen = maxOf(cur.size, latest.size)
+            for (i in 0 until maxLen) {
+                val a = cur.getOrElse(i) { 0 }
+                val b = latest.getOrElse(i) { 0 }
+                if (a < b) return VersionCompareState.UPDATE_AVAILABLE
+                if (a > b) return VersionCompareState.UP_TO_DATE
+            }
+            return VersionCompareState.UP_TO_DATE
+        }
+
+        fun formatVersionComparison(name: String, installedRaw: String, latestTag: String?): String {
+            if (latestTag.isNullOrBlank()) return "$name: check failed"
+            val installedShort = extractShortVersion(installedRaw)
+            val latestShort = extractShortVersion(latestTag)
+            return when (compareVersionTags(installedRaw, latestTag)) {
+                VersionCompareState.UP_TO_DATE -> "$name $installedShort (Up to date)"
+                VersionCompareState.UPDATE_AVAILABLE -> "$name $installedShort → $latestShort (Update available)"
+                VersionCompareState.UNKNOWN -> "$name latest $latestShort"
+            }
+        }
+    }
+
+    private data class CachedBinaryProbe(
+        val lastModified: Long,
+        val length: Long,
+        val versionOutput: String?
+    ) {
+        val executable: Boolean get() = versionOutput != null
+    }
+
+    private val probeCache = java.util.concurrent.ConcurrentHashMap<String, CachedBinaryProbe>()
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     val coreDir: File get() = File(context.filesDir, "core").apply { mkdirs() }
@@ -46,6 +99,10 @@ class CoreManager(private val context: Context) {
     fun hasGeoIp(): Boolean = geoIpFile.exists() && geoIpFile.length() > 1024L
     fun hasGeoSite(): Boolean = geoSiteFile.exists() && geoSiteFile.length() > 1024L
     fun isWxEnforced(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+    fun invalidateProbeCache() {
+        probeCache.clear()
+    }
 
     fun ensureBundledGeoAssets() {
         runCatching {
@@ -82,56 +139,94 @@ class CoreManager(private val context: Context) {
         if (file.exists() && file.length() > 0L) file else null
     }.getOrNull()
 
-    fun resolveExecutableBinary(): Pair<File?, String> {
+    /**
+     * Probes binary executability & version in a SINGLE spawn and caches by (path, mtime, length).
+     * Eliminates ~6 heavy Go binary spawns per Settings refresh and avoids re-probing on every connect!
+     */
+    private fun probeBinaryCached(file: File): CachedBinaryProbe {
+        if (!file.exists() || file.length() <= 0L || !file.canExecute()) {
+            return CachedBinaryProbe(0L, 0L, null)
+        }
+        val key = file.absolutePath
+        val mtime = file.lastModified()
+        val len = file.length()
+        probeCache[key]?.let { cached ->
+            if (cached.lastModified == mtime && cached.length == len) {
+                return cached
+            }
+        }
+        val version = probeVersionOutput(file)
+        val fresh = CachedBinaryProbe(mtime, len, version)
+        probeCache[key] = fresh
+        return fresh
+    }
+
+    private fun resolveXrayWithProbe(): Triple<File?, String, CachedBinaryProbe?> {
         if (runtimeXrayBinary.exists() && runtimeXrayBinary.length() > 0L) {
             runtimeXrayBinary.setExecutable(true, false)
-            if (canExecute(runtimeXrayBinary)) {
-                return runtimeXrayBinary to "Hot-Swapped (filesDir)"
+            val probe = probeBinaryCached(runtimeXrayBinary)
+            if (probe.executable) {
+                return Triple(runtimeXrayBinary, "Hot-Swapped (filesDir)", probe)
             }
         }
         resolvePluginBinary("com.v2vex.core.xray", "libxray.so")?.let { pluginBin ->
-            if (canExecute(pluginBin)) return pluginBin to "Plugin APK (Xray)"
+            val probe = probeBinaryCached(pluginBin)
+            if (probe.executable) return Triple(pluginBin, "Plugin APK (Xray)", probe)
         }
         if (bundledXrayBinary.exists() && bundledXrayBinary.length() > 0L) {
-            if (canExecute(bundledXrayBinary)) {
-                return bundledXrayBinary to "Bundled (jniLibs)"
+            val probe = probeBinaryCached(bundledXrayBinary)
+            if (probe.executable) {
+                return Triple(bundledXrayBinary, "Bundled (jniLibs)", probe)
             }
         }
         if (runtimeXrayBinary.exists()) {
-            return runtimeXrayBinary to "Blocked by Android W^X"
+            return Triple(runtimeXrayBinary, "Blocked by Android W^X", null)
         }
-        return null to "Not Installed"
+        return Triple(null, "Not Installed", null)
     }
 
-    fun resolveSingBoxBinary(): Pair<File?, String> {
+    private fun resolveSingBoxWithProbe(): Triple<File?, String, CachedBinaryProbe?> {
         if (runtimeSingBoxBinary.exists() && runtimeSingBoxBinary.length() > 0L) {
             runtimeSingBoxBinary.setExecutable(true, false)
-            if (canExecute(runtimeSingBoxBinary)) {
-                return runtimeSingBoxBinary to "Hot-Swapped (Sing-box)"
+            val probe = probeBinaryCached(runtimeSingBoxBinary)
+            if (probe.executable) {
+                return Triple(runtimeSingBoxBinary, "Hot-Swapped (Sing-box)", probe)
             }
         }
         resolvePluginBinary("com.v2vex.core.singbox", "libsingbox.so")?.let { pluginBin ->
-            if (canExecute(pluginBin)) return pluginBin to "Plugin APK (Sing-box)"
+            val probe = probeBinaryCached(pluginBin)
+            if (probe.executable) return Triple(pluginBin, "Plugin APK (Sing-box)", probe)
         }
         if (bundledSingBoxBinary.exists() && bundledSingBoxBinary.length() > 0L) {
-            if (canExecute(bundledSingBoxBinary)) {
-                return bundledSingBoxBinary to "Bundled (Sing-box)"
+            val probe = probeBinaryCached(bundledSingBoxBinary)
+            if (probe.executable) {
+                return Triple(bundledSingBoxBinary, "Bundled (Sing-box)", probe)
             }
         }
-        return null to "Sing-box Plugin Not Installed"
+        return Triple(null, "Sing-box Plugin Not Installed", null)
+    }
+
+    fun resolveExecutableBinary(): Pair<File?, String> {
+        val (bin, src, _) = resolveXrayWithProbe()
+        return bin to src
+    }
+
+    fun resolveSingBoxBinary(): Pair<File?, String> {
+        val (bin, src, _) = resolveSingBoxWithProbe()
+        return bin to src
     }
 
     fun availableGeoSiteTags(): List<String> = GeoDataInspector.loadGeoSiteTags(geoSiteFile)
     fun availableGeoIpTags(): List<String> = GeoDataInspector.loadGeoIpTags(geoIpFile)
 
     suspend fun inspectInstalledCore(): CoreInfo = withContext(Dispatchers.IO) {
-        val (bin, source) = resolveExecutableBinary()
-        val executable = bin != null && canExecute(bin)
-        val probedVersion = if (executable) probeVersionOutput(bin) else null
+        val (bin, source, xrayProbe) = resolveXrayWithProbe()
+        val executable = xrayProbe?.executable == true
+        val probedVersion = xrayProbe?.versionOutput
 
-        val (sbBin, sbSource) = resolveSingBoxBinary()
-        val sbExecutable = sbBin != null && canExecute(sbBin)
-        val sbProbedVersion = if (sbExecutable) probeVersionOutput(sbBin) else null
+        val (sbBin, sbSource, sbProbe) = resolveSingBoxWithProbe()
+        val sbExecutable = sbProbe?.executable == true
+        val sbProbedVersion = sbProbe?.versionOutput
 
         val savedVer = if (versionMetaFile.exists()) versionMetaFile.readText().trim() else ""
         val displayVer = probedVersion ?: savedVer.ifBlank { "Not Installed" }
@@ -157,12 +252,18 @@ class CoreManager(private val context: Context) {
     }
 
     /**
-     * Checks latest V2Vex APK release (which auto-bundles latest Xray-core in jniLibs for Android 10-15 W^X compliance).
+     * Checks latest V2Vex APK release (prefers matching ABI split APK, falling back to universal).
      */
     suspend fun checkAppReleaseUpdate(repo: String = "iganramdani/V2Vex"): Result<RemoteReleaseInfo> =
         withContext(Dispatchers.IO) {
             runCatching {
-                fetchGitHubRelease(repo, listOf(".apk"))
+                val abi = primaryAbi()
+                val keywords = when {
+                    abi.contains("arm64") -> listOf("arm64-v8a-release.apk", "universal-release.apk", ".apk")
+                    abi.contains("armeabi") -> listOf("armeabi-v7a-release.apk", "universal-release.apk", ".apk")
+                    else -> listOf("universal-release.apk", ".apk")
+                }
+                fetchGitHubRelease(repo, keywords)
             }
         }
 
@@ -229,6 +330,7 @@ class CoreManager(private val context: Context) {
                 LogBuffer.i("Core", "Hot-swapped Xray-core ${release.tagName} (${release.assetName})")
                 onProgress(1f, "Core hot-swapped to ${release.tagName}")
             }
+            invalidateProbeCache()
             inspectInstalledCore()
         }
     }
@@ -276,7 +378,8 @@ class CoreManager(private val context: Context) {
                     tmp.delete()
                     runtimeXrayBinary.setExecutable(true, false)
                 }
-                if (!canExecute(runtimeXrayBinary)) {
+                invalidateProbeCache()
+                if (!probeBinaryCached(runtimeXrayBinary).executable) {
                     runtimeXrayBinary.delete()
                     error("Imported binary cannot execute on Android ${Build.VERSION.SDK_INT} (SELinux W^X). GeoData was updated if present in zip.")
                 }

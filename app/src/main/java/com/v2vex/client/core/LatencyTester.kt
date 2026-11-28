@@ -28,7 +28,9 @@ object LatencyTester {
     suspend fun testRealProxyDelay(
         httpProxyPort: Int,
         probeUrl: String = "https://www.gstatic.com/generate_204",
-        timeoutMs: Int = 5000
+        timeoutMs: Int = 5000,
+        proxyUser: String = "",
+        proxyPassword: String = ""
     ): Int = withContext(Dispatchers.IO) {
         var conn: HttpURLConnection? = null
         return@withContext try {
@@ -40,6 +42,11 @@ object LatencyTester {
                 readTimeout = timeoutMs
                 useCaches = false
                 setRequestProperty("Connection", "close")
+                if (proxyUser.isNotBlank() && proxyPassword.isNotBlank()) {
+                    val token = java.util.Base64.getEncoder()
+                        .encodeToString("$proxyUser:$proxyPassword".toByteArray(Charsets.UTF_8))
+                    setRequestProperty("Proxy-Authorization", "Basic $token")
+                }
             }
             val code = conn.responseCode
             if (code in 200..299) {

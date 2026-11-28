@@ -171,6 +171,33 @@ fun SpeedLabScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
+        // Issue #12: Metered / Cellular data quota warning banner
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val isMetered = remember(context) {
+            runCatching {
+                val cm = context.getSystemService(android.net.ConnectivityManager::class.java)
+                cm?.isActiveNetworkMetered == true
+            }.getOrDefault(false)
+        }
+        val estMinMb = (settings.parallelStreams * settings.durationSeconds * 1.5 + settings.uploadPayloadMb).toInt()
+        val estMaxMb = (settings.parallelStreams * settings.durationSeconds * 4.5 + settings.uploadPayloadMb).toInt()
+        if (isMetered) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = XrayAmber.copy(alpha = 0.10f),
+                border = BorderStroke(1.dp, XrayAmber.copy(alpha = 0.45f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Metered / Cellular network detected · ${settings.parallelStreams}x streams (${settings.durationSeconds}s) may use ~$estMinMb–$estMaxMb MB",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayAmber,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         // Interactive 60fps Arc Speedometer
         SpeedGauge(
             mbps = progress.currentMbps,
@@ -221,7 +248,7 @@ fun SpeedLabScreen(
             ) {
                 Icon(
                     imageVector = if (isRunning) Icons.Rounded.Close else Icons.Rounded.PlayArrow,
-                    contentDescription = null,
+                    contentDescription = if (isRunning) "Stop Benchmark" else "Start Benchmark",
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))

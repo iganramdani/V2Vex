@@ -5,7 +5,7 @@ on:
     branches: [ main ]
     tags: [ 'v*' ]
   schedule:
-    # Weekly Monday 03:00 UTC check to verify build against latest XTLS/Xray-core
+    # Weekly Monday 03:00 UTC check to verify build against pinned cores
     - cron: '0 3 * * 1'
   workflow_dispatch:
 
@@ -30,31 +30,42 @@ jobs:
         with:
           gradle-version: '8.8'
 
-      - name: Bundle Latest Xray-core, hev-socks5-tunnel & GeoData
+      - name: Bundle Pinned Xray-core, Sing-box, hev-socks5-tunnel & GeoData
         run: |
           chmod +x scripts/update-core.sh
           ./scripts/update-core.sh
 
-      - name: Run Unit Tests & Build Release APK
+      - name: Run Unit Tests & Build ABI-Split Release APKs
         run: |
           gradle testDebugUnitTest assembleRelease --no-daemon
 
-      - name: Align & Sign Release APK
+      - name: Align & Sign Release APKs (arm64-v8a, armeabi-v7a, universal)
         env:
           V2VEX_KEYSTORE_B64: ${{ secrets.V2VEX_KEYSTORE_B64 }}
           V2VEX_KEY_ALIAS: ${{ secrets.V2VEX_KEY_ALIAS }}
           V2VEX_STORE_PASS: ${{ secrets.V2VEX_STORE_PASS }}
           V2VEX_KEY_PASS: ${{ secrets.V2VEX_KEY_PASS }}
+          V2VEX_REQUIRE_RELEASE_KEYSTORE: ${{ vars.V2VEX_REQUIRE_RELEASE_KEYSTORE }}
         run: |
           BUILD_TOOLS="$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -n 1)"
 
+          SIGNING_MODE="persistent"
           if [[ -n "$V2VEX_KEYSTORE_B64" ]]; then
+            if [[ -z "$V2VEX_STORE_PASS" || -z "$V2VEX_KEY_PASS" ]]; then
+              echo "::error::V2VEX_KEYSTORE_B64 is set but V2VEX_STORE_PASS or V2VEX_KEY_PASS is missing!"
+              exit 1
+            fi
             echo "$V2VEX_KEYSTORE_B64" | base64 -d > v2vex-release.jks
             ALIAS="${V2VEX_KEY_ALIAS:-v2vex}"
             SPASS="$V2VEX_STORE_PASS"
             KPASS="$V2VEX_KEY_PASS"
           else
-            echo "WARN: V2VEX_KEYSTORE_B64 secret not set; generating fallback release keystore"
+            if [[ "$GITHUB_REF_TYPE" == "tag" && "$V2VEX_REQUIRE_RELEASE_KEYSTORE" == "true" ]]; then
+              echo "::error::V2VEX_KEYSTORE_B64 secret is required for tagged releases when V2VEX_REQUIRE_RELEASE_KEYSTORE=true!"
+              exit 1
+            fi
+            SIGNING_MODE="ephemeral"
+            echo "::warning title=Missing V2VEX_KEYSTORE_B64::Using ephemeral CI keystore. Set V2VEX_KEYSTORE_B64, V2VEX_STORE_PASS, V2VEX_KEY_PASS secrets (and optionally repo variable V2VEX_REQUIRE_RELEASE_KEYSTORE=true) for upgrade-compatible release signing."
             keytool -genkeypair -v \
               -keystore v2vex-release.jks -alias v2vex \
               -keyalg RSA -keysize 2048 -validity 10000 \
@@ -67,48 +78,63 @@ jobs:
 
           TAG_NAME="${GITHUB_REF_NAME}"
           if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
-            TAG_NAME="v3.2.0-ci"
+            TAG_NAME="v3.3.0-ci"
           fi
-          APK_NAME="V2Vex-${TAG_NAME}-arm64-v8a-release.apk"
 
-          "$BUILD_TOOLS/zipalign" -f -p 4 \
-            app/build/outputs/apk/release/app-release-unsigned.apk \
-            aligned.apk
+          mkdir -p release-apks
+          for ABI in arm64-v8a armeabi-v7a universal; do
+            SRC_APK="app/build/outputs/apk/release/app-${ABI}-release-unsigned.apk"
+            if [[ ! -f "$SRC_APK" ]]; then
+              echo "::error::Expected APK not found: $SRC_APK"
+              ls -la app/build/outputs/apk/release/
+              exit 1
+            fi
+            OUT_APK="release-apks/V2Vex-${TAG_NAME}-${ABI}-release.apk"
+            "$BUILD_TOOLS/zipalign" -f -p 4 "$SRC_APK" "aligned-${ABI}.apk"
+            "$BUILD_TOOLS/apksigner" sign \
+              --ks v2vex-release.jks \
+              --ks-key-alias "$ALIAS" \
+              --ks-pass "pass:$SPASS" \
+              --key-pass "pass:$KPASS" \
+              --out "$OUT_APK" \
+              "aligned-${ABI}.apk"
+            "$BUILD_TOOLS/apksigner" verify "$OUT_APK"
+            rm -f "aligned-${ABI}.apk"
+          done
 
-          "$BUILD_TOOLS/apksigner" sign \
-            --ks v2vex-release.jks \
-            --ks-key-alias "$ALIAS" \
-            --ks-pass "pass:$SPASS" \
-            --key-pass "pass:$KPASS" \
-            --out "$APK_NAME" \
-            aligned.apk
+          (cd release-apks && sha256sum *.apk > SHA256SUMS.txt)
+          ls -lh release-apks/
+          cat release-apks/SHA256SUMS.txt
 
-          "$BUILD_TOOLS/apksigner" verify "$APK_NAME"
-          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
-          echo "CORE_VER=$(cat app/src/main/assets/core_version.txt || echo latest)" >> "$GITHUB_ENV"
-          echo "SINGBOX_VER=$(cat app/src/main/assets/singbox_version.txt || echo latest)" >> "$GITHUB_ENV"
+          echo "SIGNING_MODE=$SIGNING_MODE" >> "$GITHUB_ENV"
+          echo "CORE_VER=$(cat app/src/main/assets/core_version.txt || echo pinned)" >> "$GITHUB_ENV"
+          echo "SINGBOX_VER=$(cat app/src/main/assets/singbox_version.txt || echo pinned)" >> "$GITHUB_ENV"
 
-      - name: Upload Build Artifact
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: V2Vex-APK
-          path: ${{ env.APK_NAME }}
+          name: V2Vex-APKs
+          path: release-apks/*
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" "${APK_NAME}" \
-            --title "V2Vex ${GITHUB_REF_NAME} — True Auto Dual-Core Failover & MIUI Polish" \
-            --notes "## ⚪⚫ V2Vex ${GITHUB_REF_NAME} — True Auto Dual-Core Failover & MIUI Polish
+          SIGNING_NOTE=""
+          if [[ "$SIGNING_MODE" == "ephemeral" ]]; then
+            SIGNING_NOTE=$'\n> [!WARNING]\n> This release was signed with an ephemeral CI keystore because `V2VEX_KEYSTORE_B64` is not configured in repository secrets. If upgrading from a previous release signed with a different key, export a backup JSON first or set `V2VEX_KEYSTORE_B64` + `V2VEX_REQUIRE_RELEASE_KEYSTORE=true` for persistent upgrades.\n'
+          fi
 
-          ### 🔥 Fixed in ${GITHUB_REF_NAME} (Forensic Audit from Real Device \`logV2Vex.txt\`)
-          - ⚡ **True Intelligent \`Auto (Dual-Core)\` Failover**: Automatically isolates broken Observatory backup nodes (retrying primary node cleanly) AND seamlessly fails over across engines (**Xray-core ↔ Sing-box**) whenever the primary core cannot launch a node!
-          - 🔄 **Unified Dual-Core \`Check Core\`**: Checks **XTLS/Xray-core** + **SagerNet/sing-box** + **V2Vex APK** together cleanly without wasting bandwidth downloading W^X-blocked binaries on Android 10–15.
-          - 🔋 **MIUI / HyperOS Battery Banner Fix**: Live \`ON_RESUME\` re-check + permanent **\"Already Set · Hide\"** button so Xiaomi/MIUI users who already enabled *Tanpa Batas* are never nagged again.
-          - 🛡️ **Xray 26.x StreamSettings Sanitizer**: Strict uTLS fingerprint allowlist, \`HTTPUpgrade\` ALPN \`http/1.1\` guard, \`REALITY\` blank-pubkey guard, and \`allowInsecure\` / \`verifyPeerCertByName\` mutual exclusion (fixes \`proxy-2\` code-23 config failures!).
-          - 🪵 **Upgraded \`.txt\` Diagnostic Report**: Dynamic version header, active \`singbox.json\` / \`config.json\` dump, and 600-char fatal stderr priority capture.
+          gh release create "${GITHUB_REF_NAME}" release-apks/*.apk release-apks/SHA256SUMS.txt \
+            --title "V2Vex ${GITHUB_REF_NAME} — Security, ABI Splits, Dual-Core Health Failover & UX Polish" \
+            --notes "## ⚪⚫ V2Vex ${GITHUB_REF_NAME} — Security, ABI Splits, Dual-Core Health Failover & UX Polish
+          ${SIGNING_NOTE}
+          ### 🔥 Resolved in ${GITHUB_REF_NAME} (Issues #1–#12)
+          - 🛡️ **Security (#2, #8)**: Never silently downgrade TLS verification (\`insecure: true\`) on Sing-box fallback when Safe SNI Spoofing (\`verifyPeerCertByName\`) is active; **Strict Privacy Redaction** (default ON) for \`logV2Vex.txt\`; optional **SOCKS5/HTTP auth** when \`Allow LAN\` is enabled; 30-min auto-reset + Home pill for \`debug\` logging.
+          - ⚡ **Dual-Core Reliability & Parity (#3, #4, #6)**: Post-connect HTTP 204 health probe + runtime crash failover in \`Auto (Dual-Core)\`; Sing-box Multi-Hop Chain (\`detour\`) support + honest \`Xray-only\` badges; in-memory binary probe cache eliminates ~6 heavy Go spawns per inspection.
+          - 📦 **ABI-Split APKs & Reproducible Builds (#7, #11)**: Separate \`arm64-v8a\`, \`armeabi-v7a\`, and \`universal\` APKs + \`SHA256SUMS.txt\`; pinned & SHA-256 verified cores in \`scripts/core-versions.env\`; hardened keystore verification.
+          - 🎛️ **Settings, Routing & OEM Polish (#1, #5, #9, #10, #12)**: Local editable state + inline validation + Apply for Port/MTU/DNS/Fragment fields (zero keystroke snapping or hot-reload churn); real version comparison in \`Check Core\` & W^X-aware UI; MIUI Powerkeeper + Autostart deep-links & banner restore; GeoSite/GeoIP tag validation warnings & stable \`packId\` Quick Packs; SpeedLab metered network notice; mutex-safe watchdog & verified \`TProxyGetStats()\` rx/tx mapping.
 
           ### 🙏 Respect & Attribution
           Powered by **XTLS/Xray-core** (\`${CORE_VER}\`), **SagerNet/sing-box** (\`${SINGBOX_VER}\`), **heiher/hev-socks5-tunnel**, and **Loyalsoldier/v2ray-rules-dat**. Full credits in [CREDITS.md](https://github.com/iganramdani/V2Vex/blob/main/CREDITS.md)."

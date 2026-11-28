@@ -28,17 +28,41 @@ object SingBoxConfigGenerator {
 
     private val prettyJson = Json { prettyPrint = true }
 
-    fun generate(profile: ServerProfile, settings: AppSettings): String {
+    /**
+     * Returns true if the profile relies on Safe SNI Spoofing (verifyPeerCertByName != sni)
+     * with TLS verification enabled (allowInsecure = false). Sing-box does not support
+     * verifyPeerCertByName without disabling TLS verification, so we must NOT silently
+     * downgrade to insecure=true on Sing-box.
+     */
+    fun requiresUnsupportedSafeSniSpoof(profile: ServerProfile): Boolean {
+        if (profile.security == SecurityType.NONE || profile.allowInsecure) return false
+        val expectedCert = profile.verifyPeerCertByName.trim()
+        if (expectedCert.isEmpty()) return false
+        val effectiveSni = profile.sni.ifBlank { profile.address }.trim()
+        return !expectedCert.equals(effectiveSni, ignoreCase = true)
+    }
+
+    fun generate(
+        profile: ServerProfile,
+        settings: AppSettings,
+        chainProfile: ServerProfile? = null
+    ): String {
         if (profile.protocol == ProxyProtocol.RAW_JSON && profile.rawJson.isNotBlank()) {
             return profile.rawJson
         }
 
         val listenAddr = if (settings.allowLan) "0.0.0.0" else "127.0.0.1"
+        val useLanAuth = settings.allowLan &&
+            settings.lanProxyUsername.isNotBlank() &&
+            settings.lanProxyPassword.isNotBlank()
         val sbStrategy = when (settings.outboundDomainStrategy) {
             "UseIPv4" -> "ipv4_only"
             "UseIPv6" -> "ipv6_only"
             else -> null
         }
+        val useChain = chainProfile != null &&
+            chainProfile.id != profile.id &&
+            chainProfile.protocol != ProxyProtocol.RAW_JSON
 
         val root = buildJsonObject {
             putJsonObject("log") {
@@ -70,17 +94,36 @@ object SingBoxConfigGenerator {
                     put("tag", "socks-in")
                     put("listen", listenAddr)
                     put("listen_port", settings.socksPort)
+                    if (useLanAuth) {
+                        putJsonArray("users") {
+                            add(buildJsonObject {
+                                put("username", settings.lanProxyUsername)
+                                put("password", settings.lanProxyPassword)
+                            })
+                        }
+                    }
                 })
                 add(buildJsonObject {
                     put("type", "http")
                     put("tag", "http-in")
                     put("listen", listenAddr)
                     put("listen_port", settings.httpPort)
+                    if (useLanAuth) {
+                        putJsonArray("users") {
+                            add(buildJsonObject {
+                                put("username", settings.lanProxyUsername)
+                                put("password", settings.lanProxyPassword)
+                            })
+                        }
+                    }
                 })
             }
 
             putJsonArray("outbounds") {
-                add(buildProxyOutbound(profile, sbStrategy))
+                add(buildProxyOutbound(tag = "proxy", profile = profile, domainStrategy = sbStrategy, detourTag = if (useChain) "proxy-hop" else null))
+                if (useChain && chainProfile != null) {
+                    add(buildProxyOutbound(tag = "proxy-hop", profile = chainProfile, domainStrategy = sbStrategy, detourTag = null))
+                }
                 add(buildJsonObject {
                     put("type", "direct")
                     put("tag", "direct")
@@ -222,9 +265,15 @@ object SingBoxConfigGenerator {
         }
     }
 
-    private fun buildProxyOutbound(profile: ServerProfile, domainStrategy: String?): JsonObject = buildJsonObject {
-        put("tag", "proxy")
+    private fun buildProxyOutbound(
+        tag: String,
+        profile: ServerProfile,
+        domainStrategy: String?,
+        detourTag: String? = null
+    ): JsonObject = buildJsonObject {
+        put("tag", tag)
         if (domainStrategy != null) put("domain_strategy", domainStrategy)
+        if (!detourTag.isNullOrBlank()) put("detour", detourTag)
         when (profile.protocol) {
             ProxyProtocol.HYSTERIA2 -> {
                 put("type", "hysteria2")
@@ -348,11 +397,8 @@ object SingBoxConfigGenerator {
             builder.putJsonObject("tls") {
                 put("enabled", true)
                 put("server_name", profile.sni.ifBlank { profile.address })
-                // If user uses Safe SNI Spoofing (verifyPeerCertByName) where SNI != cert CN, Sing-box needs insecure=true
-                val needsInsecureForSpoof = profile.allowInsecure ||
-                    (profile.verifyPeerCertByName.isNotBlank() &&
-                        !profile.verifyPeerCertByName.equals(profile.sni, ignoreCase = true))
-                put("insecure", needsInsecureForSpoof)
+                // Security (Issue #2): NEVER silently downgrade TLS verification to insecure=true.
+                put("insecure", profile.allowInsecure)
                 if (profile.fingerprint.isNotBlank()) {
                     putJsonObject("utls") {
                         put("enabled", true)

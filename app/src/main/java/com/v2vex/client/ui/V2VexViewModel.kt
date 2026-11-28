@@ -78,7 +78,20 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
     private var settingsReloadJob: Job? = null
 
     init {
+        autoResetExpiredDebugLog()
         refreshCoreInfo()
+    }
+
+    private fun autoResetExpiredDebugLog() {
+        val cur = app.repository.settings.value
+        if (
+            cur.logLevel == "debug" &&
+            cur.debugLogEnabledAtMs > 0L &&
+            System.currentTimeMillis() - cur.debugLogEnabledAtMs > 30L * 60L * 1000L
+        ) {
+            app.repository.updateSettings { it.copy(logLevel = "warning", debugLogEnabledAtMs = 0L) }
+            com.v2vex.client.core.LogBuffer.i("APP", "Auto-reset debug log level -> warning after 30 minutes")
+        }
     }
 
     fun emitMessage(msg: String) {
@@ -119,6 +132,17 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
         return parsed.size
     }
 
+    fun setLogLevel(level: String) {
+        val ts = if (level == "debug") System.currentTimeMillis() else 0L
+        updateSettings(hotReloadVpn = true) {
+            it.copy(logLevel = level, debugLogEnabledAtMs = ts)
+        }
+        emitMessage(
+            if (level == "debug") "Core log level -> debug (auto-resets in 30m)"
+            else "Core log level -> $level"
+        )
+    }
+
     fun updateSettings(hotReloadVpn: Boolean = false, transform: (AppSettings) -> AppSettings) {
         val before = app.repository.settings.value
         app.repository.updateSettings(transform)
@@ -139,7 +163,9 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
             speedTest = b.speedTest,
             customCoreRepo = b.customCoreRepo,
             customGeoRepo = b.customGeoRepo,
-            batteryBannerDismissed = b.batteryBannerDismissed
+            batteryBannerDismissed = b.batteryBannerDismissed,
+            strictLogRedaction = b.strictLogRedaction,
+            debugLogEnabledAtMs = b.debugLogEnabledAtMs
         )
         return aNorm != b
     }
@@ -214,8 +240,15 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
         val target = app.repository.getSelectedProfile() ?: return
         viewModelScope.launch {
             val isConnected = VpnStateHolder.snapshot.value.state == VpnConnectionState.CONNECTED
+            val s = settings.value
+            val useAuth = s.allowLan && s.lanProxyUsername.isNotBlank() && s.lanProxyPassword.isNotBlank()
             val ms = if (isConnected) {
-                LatencyTester.testRealProxyDelay(settings.value.httpPort, settings.value.speedTest.pingUrl)
+                LatencyTester.testRealProxyDelay(
+                    httpProxyPort = s.httpPort,
+                    probeUrl = s.speedTest.pingUrl,
+                    proxyUser = if (useAuth) s.lanProxyUsername else "",
+                    proxyPassword = if (useAuth) s.lanProxyPassword else ""
+                )
             } else {
                 LatencyTester.testSingle(target)
             }
@@ -324,50 +357,44 @@ class V2VexViewModel(application: Application) : AndroidViewModel(application) {
             _coreUpdateProgress.value = 0.1f
             _coreUpdateStatus.value = "Checking Xray-core, Sing-box & V2Vex APK..."
 
+            val currentInfo = app.coreManager.inspectInstalledCore()
+            _coreInfo.value = currentInfo
+
             val xrayRes = app.coreManager.checkLatestXrayRelease(settings.value.customCoreRepo)
             _coreUpdateProgress.value = 0.4f
             val sbRes = app.coreManager.checkLatestSingBoxRelease()
             _coreUpdateProgress.value = 0.7f
             val apkRes = app.coreManager.checkAppReleaseUpdate()
-            apkRes.onSuccess { rel -> _appUpdateRelease.value = rel }
-
-            val xrayLatest = xrayRes.getOrNull()?.tagName ?: "check failed"
-            val sbLatest = sbRes.getOrNull()?.tagName ?: "check failed"
-            val apkLatest = apkRes.getOrNull()?.tagName ?: ""
-
-            if (app.coreManager.isWxEnforced()) {
-                // On Android 10-15 (W^X), jniLibs (libxray.so & libsingbox.so) are updated via V2Vex APK release!
-                _coreUpdateProgress.value = 1f
-                val summary = "Latest: Xray $xrayLatest · Sing-box $sbLatest" +
-                    if (apkLatest.isNotBlank()) " · App $apkLatest" else ""
-                _coreUpdateStatus.value = summary
-                com.v2vex.client.core.LogBuffer.i("Core", "Dual-Core check -> $summary")
-                emitMessage(summary)
-                _coreInfo.value = app.coreManager.inspectInstalledCore()
-            } else {
-                // Pre-Android 10: allow hot-swapping Xray binary directly
-                val xrayRel = xrayRes.getOrNull()
-                if (xrayRel != null) {
-                    app.coreManager.downloadAndInstallXrayCore(xrayRel) { frac, msg ->
-                        _coreUpdateProgress.value = frac
-                        _coreUpdateStatus.value = msg
-                    }.fold(
-                        onSuccess = { info ->
-                            _coreInfo.value = info
-                            val msg = "Xray $xrayLatest updated · Sing-box latest: $sbLatest"
-                            _coreUpdateStatus.value = msg
-                            emitMessage(msg)
-                        },
-                        onFailure = { err ->
-                            _coreUpdateStatus.value = "Update failed: ${err.message}"
-                            emitMessage("Core update failed: ${err.message}")
-                        }
-                    )
-                } else {
-                    _coreUpdateStatus.value = "Check failed: ${xrayRes.exceptionOrNull()?.message}"
-                    emitMessage("GitHub check failed")
-                }
+            val apkRel = apkRes.getOrNull()
+            val appUpdateState = apkRel?.let {
+                com.v2vex.client.core.CoreManager.compareVersionTags(
+                    com.v2vex.client.BuildConfig.VERSION_NAME,
+                    it.tagName
+                )
             }
+            _appUpdateRelease.value = if (
+                apkRel != null &&
+                appUpdateState == com.v2vex.client.core.CoreManager.VersionCompareState.UPDATE_AVAILABLE
+            ) apkRel else null
+
+            val xrayLine = com.v2vex.client.core.CoreManager.formatVersionComparison(
+                "Xray", currentInfo.installedVersion, xrayRes.getOrNull()?.tagName
+            )
+            val sbLine = com.v2vex.client.core.CoreManager.formatVersionComparison(
+                "Sing-box", currentInfo.singBoxVersion, sbRes.getOrNull()?.tagName
+            )
+            val appLine = com.v2vex.client.core.CoreManager.formatVersionComparison(
+                "V2Vex", com.v2vex.client.BuildConfig.VERSION_NAME, apkRel?.tagName
+            )
+
+            _coreUpdateProgress.value = 1f
+            val summary = "$xrayLine\n$sbLine\n$appLine"
+            _coreUpdateStatus.value = summary
+            com.v2vex.client.core.LogBuffer.i("Core", "Version check -> ${summary.replace("\n", " | ")}")
+            emitMessage(
+                if (_appUpdateRelease.value != null) "V2Vex ${apkRel?.tagName} update available!"
+                else "Core & App versions checked"
+            )
             _coreUpdateBusy.value = false
         }
     }

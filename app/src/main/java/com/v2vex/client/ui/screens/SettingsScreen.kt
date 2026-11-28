@@ -131,6 +131,55 @@ private val UPSTREAM_CREDITS = listOf(
     )
 )
 
+private fun isXiaomiDevice(): Boolean {
+    val m = android.os.Build.MANUFACTURER.orEmpty().lowercase()
+    val b = android.os.Build.BRAND.orEmpty().lowercase()
+    return m.contains("xiaomi") || m.contains("redmi") || m.contains("poco") ||
+        b.contains("xiaomi") || b.contains("redmi") || b.contains("poco")
+}
+
+private fun openBatteryOptimizationSettings(context: android.content.Context) {
+    if (isXiaomiDevice()) {
+        val miuiIntent = Intent().apply {
+            component = android.content.ComponentName(
+                "com.miui.powerkeeper",
+                "com.miui.powerkeeper.ui.HiddenAppsConfigActivity"
+            )
+            putExtra("package_name", context.packageName)
+            putExtra("package_label", "V2Vex")
+        }
+        if (runCatching { context.startActivity(miuiIntent) }.isSuccess) return
+    }
+    val aospIntent = Intent(
+        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        Uri.parse("package:${context.packageName}")
+    )
+    if (runCatching { context.startActivity(aospIntent) }.isSuccess) return
+    runCatching {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+        )
+    }
+}
+
+private fun openMiuiAutostartSettings(context: android.content.Context): Boolean {
+    val autostart = Intent().apply {
+        component = android.content.ComponentName(
+            "com.miui.securitycenter",
+            "com.miui.permcenter.autostart.AutoStartManagementActivity"
+        )
+    }
+    return runCatching { context.startActivity(autostart) }.isSuccess
+}
+
+private data class QuickPackSpec(
+    val id: String,
+    val defaultName: String,
+    val matchType: RuleMatchType,
+    val values: String,
+    val target: RuleTarget
+)
+
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
@@ -138,6 +187,8 @@ fun SettingsScreen(
     coreInfo: CoreInfo,
     geoSiteTags: List<String>,
     geoIpTags: List<String>,
+    isVpnConnected: Boolean,
+    activeCoreMode: String,
     coreUpdateBusy: Boolean,
     coreUpdateProgress: Float,
     coreUpdateStatus: String,
@@ -158,6 +209,13 @@ fun SettingsScreen(
     var editingRule by remember { mutableStateOf<CustomRoutingRule?>(null) }
     var showAppPickerDialog by remember { mutableStateOf(false) }
     var showRestoreDialog by remember { mutableStateOf(false) }
+
+    val singBoxActive = settings.coreEngine == CoreEnginePreference.SING_BOX ||
+        (isVpnConnected && activeCoreMode.contains("Sing-box", ignoreCase = true))
+    val geoSiteTagSet = remember(geoSiteTags) { geoSiteTags.toSet() }
+    val geoIpTagSet = remember(geoIpTags) { geoIpTags.toSet() }
+    val isXiaomi = remember { isXiaomiDevice() }
+    val isWxEnforced = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
 
     val pm = remember { context.getSystemService(PowerManager::class.java) }
     var batteryExempt by remember {
@@ -256,7 +314,15 @@ fun SettingsScreen(
             fontWeight = FontWeight.Bold
         )
 
-        // MIUI / HyperOS / OEM Battery Saver Exemption Banner (auto-hides on resume or when dismissed)
+        if (isVpnConnected) {
+            Text(
+                text = "Tunnel active ($activeCoreMode) · Applying network/routing changes restarts the proxy core briefly.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // MIUI / HyperOS / OEM Battery Saver Exemption Banner (auto-hides on resume or when dismissed; restorable in Settings)
         if (!batteryExempt && !settings.batteryBannerDismissed) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -276,23 +342,13 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                runCatching {
-                                    val intent = Intent(
-                                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                        Uri.parse("package:${context.packageName}")
-                                    )
-                                    context.startActivity(intent)
-                                }
-                            }
-                        ) {
-                            Text("Open Settings")
+                        OutlinedButton(onClick = { openBatteryOptimizationSettings(context) }) {
+                            Text(if (isXiaomi) "MIUI Battery" else "Open Settings")
                         }
                         TextButton(
                             onClick = {
                                 onUpdateSettings { it.copy(batteryBannerDismissed = true) }
-                                onShowMessage("Battery reminder dismissed")
+                                onShowMessage("Battery reminder hidden (restorable in Battery section below)")
                             }
                         ) {
                             Text("Already Set · Hide")
@@ -358,6 +414,14 @@ fun SettingsScreen(
                     )
                 }
             }
+            if (settings.coreEngine == CoreEnginePreference.AUTO) {
+                SettingToggleRow(
+                    title = "Post-Connect Health Probe & Runtime Failover",
+                    subtitle = "Verifies HTTP 204 connectivity after launch and fails over across cores on handshake failure or runtime crash",
+                    checked = settings.autoHealthFallback,
+                    onCheckedChange = { on -> onUpdateSettings { it.copy(autoHealthFallback = on) } }
+                )
+            }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -365,7 +429,7 @@ fun SettingsScreen(
                     onClick = onCheckAndUpdateCore,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Refresh, contentDescription = "Check Core Updates", modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Check Core")
                 }
@@ -374,26 +438,34 @@ fun SettingsScreen(
                     onClick = onUpdateGeoData,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Build, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Build, contentDescription = "Update GeoIP and GeoSite", modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Update Geo")
                 }
             }
-            OutlinedButton(
-                enabled = !coreUpdateBusy,
-                onClick = onImportLocalCore,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Import Custom Core .zip / Binary")
+            if (!isWxEnforced) {
+                OutlinedButton(
+                    enabled = !coreUpdateBusy,
+                    onClick = onImportLocalCore,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Rounded.Add, contentDescription = "Import Custom Core", modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Import Custom Core .zip / Binary")
+                }
+            } else {
+                Text(
+                    text = "Android 10+ (W^X) blocks executing binaries from app storage. Update cores cleanly via V2Vex APK or signed Core Plugin APKs.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             appUpdateRelease?.let { rel ->
                 Button(
                     onClick = { onOpenAppReleaseUrl(rel.downloadUrl) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Download V2Vex ${rel.tagName} APK")
+                    Text("Download V2Vex ${rel.tagName} APK (${rel.assetName})")
                 }
             }
         }
@@ -421,10 +493,21 @@ fun SettingsScreen(
             HorizontalDivider()
             SettingToggleRow(
                 title = "Observatory Auto-Failover (Least-Ping)",
-                subtitle = "Probes healthy backup nodes and switches seamlessly without dropping TUN",
+                subtitle = if (singBoxActive) {
+                    "Xray-only · inactive while Sing-box is active"
+                } else {
+                    "Probes healthy backup nodes and switches seamlessly without dropping TUN"
+                },
                 checked = settings.enableAutoFailover,
                 onCheckedChange = { on -> onUpdateSettings { it.copy(enableAutoFailover = on) } }
             )
+            if (singBoxActive && settings.enableAutoFailover) {
+                Text(
+                    text = "⚠ Observatory Auto-Failover is Xray-only and ignored when Sing-box is active.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayAmber
+                )
+            }
             if (settings.enableAutoFailover && profiles.size > 1) {
                 Text("Select Failover Pool (leave empty for auto-healthy nodes)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(
@@ -450,6 +533,13 @@ fun SettingsScreen(
 
         // 3. ROUTING ENGINE & CUSTOM RULES
         SettingsSectionCard(title = "Routing Engine") {
+            if (singBoxActive) {
+                Text(
+                    text = "⚠ GeoSite / GeoIP (.dat) tokens are Xray-only. Domain/IP/Port rules still work on Sing-box.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayAmber
+                )
+            }
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -477,43 +567,47 @@ fun SettingsScreen(
             Text("1-Tap GeoSite & GeoIP Packs", style = MaterialTheme.typography.labelMedium)
             val quickPacks = remember {
                 listOf(
-                    Triple("Block Ads", RuleMatchType.DOMAIN, "geosite:category-ads-all") to RuleTarget.BLOCK,
-                    Triple("Direct Indonesia", RuleMatchType.IP, "geoip:id") to RuleTarget.DIRECT,
-                    Triple("Proxy Streaming", RuleMatchType.DOMAIN, "geosite:youtube,geosite:netflix,geosite:spotify,geosite:disney") to RuleTarget.PROXY,
-                    Triple("Proxy AI & Dev", RuleMatchType.DOMAIN, "geosite:openai,geosite:anthropic,geosite:github") to RuleTarget.PROXY,
-                    Triple("Proxy Social", RuleMatchType.DOMAIN, "geosite:telegram,geosite:instagram,geosite:tiktok") to RuleTarget.PROXY
+                    QuickPackSpec("pack_ads", "Block Ads", RuleMatchType.DOMAIN, "geosite:category-ads-all", RuleTarget.BLOCK),
+                    QuickPackSpec("pack_id_direct", "Direct Indonesia", RuleMatchType.IP, "geoip:id", RuleTarget.DIRECT),
+                    QuickPackSpec("pack_streaming", "Proxy Streaming", RuleMatchType.DOMAIN, "geosite:youtube,geosite:netflix,geosite:spotify,geosite:disney", RuleTarget.PROXY),
+                    QuickPackSpec("pack_ai_dev", "Proxy AI & Dev", RuleMatchType.DOMAIN, "geosite:openai,geosite:anthropic,geosite:github", RuleTarget.PROXY),
+                    QuickPackSpec("pack_social", "Proxy Social", RuleMatchType.DOMAIN, "geosite:telegram,geosite:instagram,geosite:tiktok", RuleTarget.PROXY)
                 )
             }
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                quickPacks.forEach { (spec, target) ->
-                    val (packName, matchType, values) = spec
-                    val existing = settings.customRules.firstOrNull { it.name == packName }
+                quickPacks.forEach { pack ->
+                    val existing = settings.customRules.firstOrNull {
+                        it.packId == pack.id || (it.packId == null && it.name == pack.defaultName)
+                    }
                     val active = existing?.enabled == true
                     FilterChip(
                         selected = active,
                         onClick = {
                             onUpdateSettings { s ->
-                                val cur = s.customRules.firstOrNull { it.name == packName }
+                                val cur = s.customRules.firstOrNull {
+                                    it.packId == pack.id || (it.packId == null && it.name == pack.defaultName)
+                                }
                                 val nextRules = if (cur != null) {
-                                    s.customRules.filterNot { it.name == packName }
+                                    s.customRules.filterNot { it.id == cur.id }
                                 } else {
                                     listOf(
                                         CustomRoutingRule(
-                                            name = packName,
-                                            matchType = matchType,
-                                            values = values,
-                                            target = target
+                                            name = pack.defaultName,
+                                            matchType = pack.matchType,
+                                            values = pack.values,
+                                            target = pack.target,
+                                            packId = pack.id
                                         )
                                     ) + s.customRules
                                 }
                                 s.copy(customRules = nextRules)
                             }
-                            onShowMessage(if (active) "Removed '$packName'" else "Enabled '$packName' (${target.label})")
+                            onShowMessage(if (active) "Removed '${pack.defaultName}'" else "Enabled '${pack.defaultName}' (${pack.target.label})")
                         },
-                        label = { Text(packName) }
+                        label = { Text(pack.defaultName) }
                     )
                 }
             }
@@ -526,12 +620,20 @@ fun SettingsScreen(
             ) {
                 Text("Custom Rules (${settings.customRules.size})", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = { showAddRuleDialog = true }) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Add, contentDescription = "Add GeoSite or Routing Rule", modifier = Modifier.size(16.dp))
                     Text("GeoSite / Rule")
                 }
             }
 
             settings.customRules.forEach { rule ->
+                val invalidTokens = remember(rule.matchType, rule.values, geoSiteTagSet, geoIpTagSet) {
+                    com.v2vex.client.core.GeoDataInspector.findInvalidGeoTokens(
+                        matchType = rule.matchType,
+                        values = rule.values,
+                        validGeoSiteTags = geoSiteTagSet,
+                        validGeoIpTags = geoIpTagSet
+                    )
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -550,11 +652,18 @@ fun SettingsScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("${rule.name} -> ${rule.target.label}", style = MaterialTheme.typography.bodyMedium)
                         Text("${rule.matchType.label}: ${rule.values}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (invalidTokens.isNotEmpty()) {
+                            Text(
+                                text = "⚠ Unrecognized tag(s): ${invalidTokens.joinToString(", ")}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = XrayAmber
+                            )
+                        }
                     }
                     IconButton(onClick = {
                         onUpdateSettings { s -> s.copy(customRules = s.customRules.filterNot { it.id == rule.id }) }
                     }) {
-                        Icon(Icons.Rounded.Delete, contentDescription = "Delete", tint = XrayCoral)
+                        Icon(Icons.Rounded.Delete, contentDescription = "Delete Rule", tint = XrayCoral)
                     }
                 }
             }
@@ -564,43 +673,105 @@ fun SettingsScreen(
         SettingsSectionCard(title = "DPI Fragment · Mux · Multi-Hop Chain") {
             SettingToggleRow(
                 title = "TLS Fragmentation (DPI Bypass)",
-                subtitle = "Splits ClientHello packets to defeat deep packet inspection",
+                subtitle = if (singBoxActive) {
+                    "Xray-only · inactive while Sing-box is active"
+                } else {
+                    "Splits ClientHello packets to defeat deep packet inspection"
+                },
                 checked = settings.fragment.enabled,
                 onCheckedChange = { on -> onUpdateSettings { it.copy(fragment = it.fragment.copy(enabled = on)) } }
             )
+            if (singBoxActive && settings.fragment.enabled) {
+                Text(
+                    text = "⚠ TLS Fragmentation is Xray-only and inactive on Sing-box.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayAmber
+                )
+            }
             if (settings.fragment.enabled) {
+                val rangeRegex = remember { Regex("""^\d+(-\d+)?$""") }
+                var fragPackets by remember(settings.fragment.packets) { mutableStateOf(settings.fragment.packets) }
+                var fragLength by remember(settings.fragment.length) { mutableStateOf(settings.fragment.length) }
+                var fragInterval by remember(settings.fragment.interval) { mutableStateOf(settings.fragment.interval) }
+
+                val packetsValid = fragPackets.trim().equals("tlshello", ignoreCase = true) || rangeRegex.matches(fragPackets.trim())
+                val lengthValid = rangeRegex.matches(fragLength.trim())
+                val intervalValid = rangeRegex.matches(fragInterval.trim())
+                val fragDirty = fragPackets.trim() != settings.fragment.packets ||
+                    fragLength.trim() != settings.fragment.length ||
+                    fragInterval.trim() != settings.fragment.interval
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
-                        value = settings.fragment.packets,
-                        onValueChange = { v -> onUpdateSettings { it.copy(fragment = it.fragment.copy(packets = v)) } },
+                        value = fragPackets,
+                        onValueChange = { fragPackets = it },
                         label = { Text("Packets") },
+                        isError = !packetsValid,
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedTextField(
-                        value = settings.fragment.length,
-                        onValueChange = { v -> onUpdateSettings { it.copy(fragment = it.fragment.copy(length = v)) } },
+                        value = fragLength,
+                        onValueChange = { fragLength = it },
                         label = { Text("Length") },
+                        isError = !lengthValid,
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedTextField(
-                        value = settings.fragment.interval,
-                        onValueChange = { v -> onUpdateSettings { it.copy(fragment = it.fragment.copy(interval = v)) } },
+                        value = fragInterval,
+                        onValueChange = { fragInterval = it },
                         label = { Text("Interval ms") },
+                        isError = !intervalValid,
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
+                }
+                if (!packetsValid || !lengthValid || !intervalValid) {
+                    Text(
+                        text = "Use 'tlshello' or numeric range like '10-20'",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = XrayCoral
+                    )
+                }
+                if (fragDirty) {
+                    Button(
+                        enabled = packetsValid && lengthValid && intervalValid,
+                        onClick = {
+                            onUpdateSettings {
+                                it.copy(
+                                    fragment = it.fragment.copy(
+                                        packets = fragPackets.trim(),
+                                        length = fragLength.trim(),
+                                        interval = fragInterval.trim()
+                                    )
+                                )
+                            }
+                            onShowMessage("Fragment settings applied")
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Apply Fragment") }
                 }
             }
 
             HorizontalDivider()
             SettingToggleRow(
                 title = "Mux.Cool Multiplexing",
-                subtitle = "Multiplex TCP/XUDP streams (auto-skipped on XTLS-Vision)",
+                subtitle = if (singBoxActive) {
+                    "Xray-only · inactive while Sing-box is active"
+                } else {
+                    "Multiplex TCP/XUDP streams (auto-skipped on XTLS-Vision)"
+                },
                 checked = settings.mux.enabled,
                 onCheckedChange = { on -> onUpdateSettings { it.copy(mux = it.mux.copy(enabled = on)) } }
             )
+            if (singBoxActive && settings.mux.enabled) {
+                Text(
+                    text = "⚠ Mux.Cool is Xray-only and inactive on Sing-box.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayAmber
+                )
+            }
 
             HorizontalDivider()
             SettingToggleRow(
@@ -611,7 +782,7 @@ fun SettingsScreen(
             )
 
             HorizontalDivider()
-            Text("Multi-Hop Proxy Chain (e.g. Bug Node -> WARP Clean IP)", style = MaterialTheme.typography.labelMedium)
+            Text("Multi-Hop Proxy Chain (Xray dialerProxy & Sing-box detour)", style = MaterialTheme.typography.labelMedium)
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -633,30 +804,65 @@ fun SettingsScreen(
 
         // 5. DNS ENGINE (WITH PORT-53 HIJACK)
         SettingsSectionCard(title = "DNS Engine (Port-53 DoH Hijack Active)") {
+            var remoteDnsText by remember(settings.dns.remoteDns) { mutableStateOf(settings.dns.remoteDns) }
+            var directDnsText by remember(settings.dns.directDns) { mutableStateOf(settings.dns.directDns) }
+            val dnsValid = remoteDnsText.trim().isNotEmpty() && directDnsText.trim().isNotEmpty()
+            val dnsDirty = remoteDnsText.trim() != settings.dns.remoteDns || directDnsText.trim() != settings.dns.directDns
+
             OutlinedTextField(
-                value = settings.dns.remoteDns,
-                onValueChange = { v -> onUpdateSettings { it.copy(dns = it.dns.copy(remoteDns = v.trim())) } },
+                value = remoteDnsText,
+                onValueChange = { remoteDnsText = it },
                 label = { Text("Primary Encrypted DNS (DoH / DoT)") },
+                isError = remoteDnsText.trim().isEmpty(),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
             OutlinedTextField(
-                value = settings.dns.directDns,
-                onValueChange = { v -> onUpdateSettings { it.copy(dns = it.dns.copy(directDns = v.trim())) } },
+                value = directDnsText,
+                onValueChange = { directDnsText = it },
                 label = { Text("Direct / Bootstrap DNS") },
+                isError = directDnsText.trim().isEmpty(),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            if (dnsDirty) {
+                Button(
+                    enabled = dnsValid,
+                    onClick = {
+                        onUpdateSettings {
+                            it.copy(
+                                dns = it.dns.copy(
+                                    remoteDns = remoteDnsText.trim(),
+                                    directDns = directDnsText.trim()
+                                )
+                            )
+                        }
+                        onShowMessage("DNS settings applied")
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Apply DNS") }
+            }
             SettingToggleRow(
                 title = "Enable FakeDNS (198.18.0.0/15)",
-                subtitle = "0-RTT synthetic IP mapping for instant domain resolution",
+                subtitle = if (singBoxActive) {
+                    "Xray-only · inactive while Sing-box is active"
+                } else {
+                    "0-RTT synthetic IP mapping for instant domain resolution"
+                },
                 checked = settings.dns.enableFakeDns,
                 onCheckedChange = { on -> onUpdateSettings { it.copy(dns = it.dns.copy(enableFakeDns = on)) } }
             )
+            if (singBoxActive && settings.dns.enableFakeDns) {
+                Text(
+                    text = "⚠ FakeDNS is Xray-only and inactive on Sing-box.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayAmber
+                )
+            }
         }
 
-        // 6. SPLIT TUNNELING & TWO-TONE APPEARANCE
-        SettingsSectionCard(title = "Split Tunneling · Two-Tone Minimalist UI") {
+        // 6. SPLIT TUNNELING, LOCAL PORTS, LAN AUTH & TWO-TONE APPEARANCE
+        SettingsSectionCard(title = "Split Tunneling · Ports · LAN · UI") {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -674,34 +880,131 @@ fun SettingsScreen(
                     onClick = { showAppPickerDialog = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.AutoMirrored.Rounded.List, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.AutoMirrored.Rounded.List, contentDescription = "Select Split Tunnel Apps", modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Select Apps (${settings.splitTunnelPackages.size})")
                 }
             }
 
+            // Issue #1: Local editable text state with inline validation & Apply (no keystroke snapping or hot-reload churn!)
+            var socksPortText by remember(settings.socksPort) { mutableStateOf(settings.socksPort.toString()) }
+            var httpPortText by remember(settings.httpPort) { mutableStateOf(settings.httpPort.toString()) }
+            var mtuText by remember(settings.vpnMtu) { mutableStateOf(settings.vpnMtu.toString()) }
+
+            val socksParsed = socksPortText.trim().toIntOrNull()
+            val httpParsed = httpPortText.trim().toIntOrNull()
+            val mtuParsed = mtuText.trim().toIntOrNull()
+
+            val socksValid = socksParsed != null && socksParsed in 1024..65535
+            val httpValid = httpParsed != null && httpParsed in 1024..65535 && httpParsed != socksParsed
+            val mtuValid = mtuParsed != null && mtuParsed in 1280..9000
+            val portsDirty = socksParsed != settings.socksPort || httpParsed != settings.httpPort || mtuParsed != settings.vpnMtu
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
-                    value = settings.socksPort.toString(),
-                    onValueChange = { v -> v.toIntOrNull()?.let { p -> onUpdateSettings { it.copy(socksPort = p.coerceIn(1024, 65535)) } } },
+                    value = socksPortText,
+                    onValueChange = { socksPortText = it.filter { c -> c.isDigit() }.take(5) },
                     label = { Text("SOCKS5") },
+                    isError = !socksValid,
                     singleLine = true,
                     modifier = Modifier.weight(1f)
                 )
                 OutlinedTextField(
-                    value = settings.httpPort.toString(),
-                    onValueChange = { v -> v.toIntOrNull()?.let { p -> onUpdateSettings { it.copy(httpPort = p.coerceIn(1024, 65535)) } } },
+                    value = httpPortText,
+                    onValueChange = { httpPortText = it.filter { c -> c.isDigit() }.take(5) },
                     label = { Text("HTTP") },
+                    isError = !httpValid,
                     singleLine = true,
                     modifier = Modifier.weight(1f)
                 )
                 OutlinedTextField(
-                    value = settings.vpnMtu.toString(),
-                    onValueChange = { v -> v.toIntOrNull()?.let { m -> onUpdateSettings { it.copy(vpnMtu = m.coerceIn(1280, 9000)) } } },
+                    value = mtuText,
+                    onValueChange = { mtuText = it.filter { c -> c.isDigit() }.take(4) },
                     label = { Text("MTU") },
+                    isError = !mtuValid,
                     singleLine = true,
                     modifier = Modifier.weight(1f)
                 )
+            }
+            if (!socksValid || !httpValid || !mtuValid) {
+                Text(
+                    text = "Ports must be distinct (1024–65535); MTU must be 1280–9000.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayCoral
+                )
+            }
+            if (portsDirty) {
+                Button(
+                    enabled = socksValid && httpValid && mtuValid,
+                    onClick = {
+                        onUpdateSettings {
+                            it.copy(
+                                socksPort = socksParsed!!,
+                                httpPort = httpParsed!!,
+                                vpnMtu = mtuParsed!!
+                            )
+                        }
+                        onShowMessage("Ports & MTU applied (${socksParsed}/${httpParsed}, MTU ${mtuParsed})")
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Apply Ports & MTU") }
+            }
+
+            HorizontalDivider()
+            SettingToggleRow(
+                title = "Allow LAN Connections (0.0.0.0)",
+                subtitle = "Share local SOCKS5/HTTP proxy on Wi-Fi/hotspot",
+                checked = settings.allowLan,
+                onCheckedChange = { on -> onUpdateSettings { it.copy(allowLan = on) } }
+            )
+            if (settings.allowLan) {
+                var lanUserText by remember(settings.lanProxyUsername) { mutableStateOf(settings.lanProxyUsername) }
+                var lanPassText by remember(settings.lanProxyPassword) { mutableStateOf(settings.lanProxyPassword) }
+                val authDirty = lanUserText.trim() != settings.lanProxyUsername || lanPassText != settings.lanProxyPassword
+                val authValid = (lanUserText.trim().isEmpty() && lanPassText.isEmpty()) ||
+                    (lanUserText.trim().isNotEmpty() && lanPassText.isNotEmpty())
+
+                if (settings.lanProxyUsername.isBlank() || settings.lanProxyPassword.isBlank()) {
+                    Text(
+                        text = "⚠ Allow LAN without username/password exposes your proxy to anyone on the same Wi-Fi/hotspot.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = XrayAmber
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = lanUserText,
+                        onValueChange = { lanUserText = it },
+                        label = { Text("LAN Username") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = lanPassText,
+                        onValueChange = { lanPassText = it },
+                        label = { Text("LAN Password") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (authDirty) {
+                    Button(
+                        enabled = authValid,
+                        onClick = {
+                            onUpdateSettings {
+                                it.copy(
+                                    lanProxyUsername = lanUserText.trim(),
+                                    lanProxyPassword = lanPassText
+                                )
+                            }
+                            onShowMessage(
+                                if (lanUserText.trim().isNotEmpty()) "LAN proxy authentication enabled"
+                                else "LAN proxy authentication cleared"
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Apply LAN Auth") }
+                }
             }
 
             SettingToggleRow(
@@ -735,14 +1038,57 @@ fun SettingsScreen(
             }
         }
 
-        // 7. DIAGNOSTICS (.TXT), ALWAYS-ON VPN & BACKUP
+        // 7. BATTERY & BACKGROUND OPTIMIZATION (MIUI / HYPEROS / OEM — Issue #9)
+        SettingsSectionCard(title = "Battery & Background Optimization") {
+            Text(
+                text = if (batteryExempt) {
+                    "Android battery optimization exemption is active."
+                } else {
+                    "Allow unrestricted background battery so Android/MIUI does not terminate the VPN tunnel while locked."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { openBatteryOptimizationSettings(context) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (isXiaomi) "MIUI Battery Saver" else "Battery Settings")
+                }
+                if (isXiaomi) {
+                    OutlinedButton(
+                        onClick = {
+                            if (!openMiuiAutostartSettings(context)) {
+                                openBatteryOptimizationSettings(context)
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("MIUI Autostart")
+                    }
+                }
+            }
+            if (settings.batteryBannerDismissed) {
+                TextButton(
+                    onClick = {
+                        onUpdateSettings { it.copy(batteryBannerDismissed = false) }
+                        onShowMessage("Battery reminder banner restored")
+                    }
+                ) {
+                    Text("Restore Dismissed Battery Reminder Banner")
+                }
+            }
+        }
+
+        // 8. DIAGNOSTICS (.TXT), ALWAYS-ON VPN & BACKUP
         SettingsSectionCard(title = "Diagnostics (.txt) · System VPN · Backup") {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onOpenLogs,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Info, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Info, contentDescription = "Open Diagnostic Logs", modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Log (.txt)")
                 }
@@ -764,7 +1110,7 @@ fun SettingsScreen(
                     },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.Share, contentDescription = "Copy Backup JSON", modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Copy Backup")
                 }
@@ -995,9 +1341,19 @@ private fun AddRoutingRuleDialog(
                     }
                 }
 
+                val invalidDraftTokens = remember(matchType, values, geoSiteTags, geoIpTags) {
+                    com.v2vex.client.core.GeoDataInspector.findInvalidGeoTokens(
+                        matchType = matchType,
+                        values = values,
+                        validGeoSiteTags = geoSiteTags.toSet(),
+                        validGeoIpTags = geoIpTags.toSet()
+                    )
+                }
+
                 OutlinedTextField(
                     value = values,
                     onValueChange = { values = it },
+                    isError = invalidDraftTokens.isNotEmpty(),
                     label = {
                         Text(
                             when (matchType) {
@@ -1010,6 +1366,13 @@ private fun AddRoutingRuleDialog(
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
+                if (invalidDraftTokens.isNotEmpty()) {
+                    Text(
+                        text = "⚠ Not found in bundled GeoData: ${invalidDraftTokens.joinToString(", ")}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = XrayAmber
+                    )
+                }
             }
         },
         confirmButton = {

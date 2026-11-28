@@ -116,13 +116,29 @@ fun DashboardScreen(
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 Text(
-                    text = "v3.0 · 99% FAST & LIGHT",
+                    text = "v${com.v2vex.client.BuildConfig.VERSION_NAME} · 99% FAST & LIGHT",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (settings.logLevel == "debug") {
+                    Surface(
+                        onClick = onOpenLogs,
+                        shape = RoundedCornerShape(8.dp),
+                        color = XrayAmber.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, XrayAmber.copy(alpha = 0.65f))
+                    ) {
+                        Text(
+                            text = "DEBUG LOG",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = XrayAmber,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                        )
+                    }
+                }
                 Surface(
                     onClick = onOpenLogs,
                     shape = RoundedCornerShape(8.dp),
@@ -151,11 +167,11 @@ fun DashboardScreen(
                             modifier = Modifier
                                 .size(6.dp)
                                 .clip(CircleShape)
-                                .background(if (coreInfo.executable) signalTone else XrayAmber)
+                                .background(if (coreInfo.executable || coreInfo.singBoxExecutable) signalTone else XrayAmber)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (coreInfo.executable) "CORE OK" else "NO CORE",
+                            text = if (coreInfo.executable || coreInfo.singBoxExecutable) "CORE OK" else "NO CORE",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -190,6 +206,18 @@ fun DashboardScreen(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (
+                snapshot.state == VpnConnectionState.CONNECTED &&
+                snapshot.coreMode.contains("Sing-box", ignoreCase = true) &&
+                (settings.fragment.enabled || settings.mux.enabled || settings.dns.enableFakeDns || settings.enableAutoFailover)
+            ) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Sing-box active · Fragment, Mux, Failover & FakeDNS are Xray-only",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = XrayAmber
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(16.dp))

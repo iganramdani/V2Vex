@@ -226,13 +226,52 @@ object LogBuffer {
         scope.launch { runCatching { logFile?.writeText("") } }
     }
 
-    fun buildFullBugReport(context: Context, extraHeader: String = ""): String {
+    private val secretFieldRegex = Regex(
+        """"(id|uuid|password|pass|user|username|secretKey|publicKey|preSharedKey|private_key|peer_public_key)"\s*:\s*"[^"]+""""
+    )
+
+    private val strictInfraFieldRegex = Regex(
+        """"(address|server|serverName|server_name|verifyPeerCertByName|host|Host|path|serviceName|service_name|endpoint)"\s*:\s*"([^"]+)""""
+    )
+
+    private val safeNonPrivateValues = setOf(
+        "127.0.0.1", "0.0.0.0", "localhost", "::1",
+        "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9",
+        "/dns-query", "/"
+    )
+
+    /**
+     * Redacts secrets (always) and optionally private infrastructure fields
+     * (server addresses, SNI, bug hosts, WebSocket/HTTPUpgrade/gRPC paths) when strictPrivacy=true.
+     */
+    fun redactConfigJson(raw: String, strictPrivacy: Boolean = true): String {
+        var out = raw.replace(secretFieldRegex, """"$1": "<REDACTED>"""")
+        if (strictPrivacy) {
+            out = strictInfraFieldRegex.replace(out) { m ->
+                val key = m.groupValues[1]
+                val value = m.groupValues[2]
+                if (value in safeNonPrivateValues || value.startsWith("https://1.1.1.1") || value.startsWith("https://8.8.8.8")) {
+                    m.value
+                } else {
+                    """"$key": "<REDACTED_HOST>""""
+                }
+            }
+        }
+        return out
+    }
+
+    fun buildFullBugReport(
+        context: Context,
+        extraHeader: String = "",
+        strictPrivacy: Boolean = true
+    ): String {
         val (sysSnap, engSnap) = synchronized(lock) {
             systemBuffer.toList() to engineBuffer.toList()
         }
         val sb = StringBuilder()
         sb.appendLine("===== V2VEX v${BuildConfig.VERSION_NAME} REAL-TIME DIAGNOSTIC REPORT (.TXT) =====")
         sb.appendLine("Generated: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(Date())}")
+        sb.appendLine("Privacy Redaction: ${if (strictPrivacy) "STRICT (secrets + server hosts/SNI/paths masked)" else "STANDARD (secrets only)"}")
         sb.appendLine("App: V2Vex ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         sb.appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         sb.appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
@@ -243,7 +282,9 @@ object LogBuffer {
         val tproxyFile = File(context.filesDir, "tproxy.yml")
         if (tproxyFile.exists()) {
             sb.appendLine("\n--- tproxy.yml ---")
-            sb.appendLine(runCatching { tproxyFile.readText() }.getOrDefault("<unreadable>"))
+            val tproxyRaw = runCatching { tproxyFile.readText() }.getOrDefault("<unreadable>")
+            val tproxyRedacted = tproxyRaw.replace(Regex("""(username|password):\s*.*"""), "$1: <REDACTED>")
+            sb.appendLine(tproxyRedacted)
         }
         val xrayCfg = File(context.filesDir, "config.json")
         val sbCfg = File(context.filesDir, "singbox.json")
@@ -254,13 +295,9 @@ object LogBuffer {
             else -> null
         }
         if (activeCfg != null) {
-            sb.appendLine("\n--- ${activeCfg.name} (secrets redacted) ---")
+            sb.appendLine("\n--- ${activeCfg.name} (${if (strictPrivacy) "strict privacy redacted" else "secrets redacted"}) ---")
             val raw = runCatching { activeCfg.readText() }.getOrDefault("")
-            val redacted = raw.replace(
-                Regex(""""(id|uuid|password|secretKey|publicKey|preSharedKey|private_key|peer_public_key)"\s*:\s*"[^"]+""""),
-                """"$1": "<REDACTED>""""
-            )
-            sb.appendLine(redacted)
+            sb.appendLine(redactConfigJson(raw, strictPrivacy = strictPrivacy))
         }
         sb.appendLine("\n--- PINNED SYSTEM & TELEMETRY LOGS (${sysSnap.size} entries — never evicted) ---")
         sysSnap.forEach {
@@ -278,10 +315,14 @@ object LogBuffer {
      * Writes the full diagnostic report to filesDir/logs/logV2Vex.txt and returns the File
      * so Android FileProvider can share it as a real .txt file attachment.
      */
-    fun exportTxtReportFile(context: Context, extraHeader: String = ""): File {
+    fun exportTxtReportFile(
+        context: Context,
+        extraHeader: String = "",
+        strictPrivacy: Boolean = true
+    ): File {
         val dir = logDir ?: File(context.filesDir, "logs").apply { mkdirs() }
         val outFile = File(dir, "logV2Vex.txt")
-        outFile.writeText(buildFullBugReport(context, extraHeader))
+        outFile.writeText(buildFullBugReport(context, extraHeader, strictPrivacy))
         return outFile
     }
 }

@@ -33,7 +33,8 @@ data class CustomRoutingRule(
     val enabled: Boolean = true,
     val matchType: RuleMatchType = RuleMatchType.DOMAIN,
     val values: String = "", // comma-separated, e.g. "geosite:category-ads-all,domain:example.com"
-    val target: RuleTarget = RuleTarget.DIRECT
+    val target: RuleTarget = RuleTarget.DIRECT,
+    val packId: String? = null // Stable Quick Pack identifier (survives user renames)
 )
 
 @Serializable
@@ -119,12 +120,15 @@ data class AppSettings(
     val httpPort: Int = 10809,
     val apiPort: Int = 10810,
     val allowLan: Boolean = false,
+    val lanProxyUsername: String = "",
+    val lanProxyPassword: String = "",
     val enableIpv6: Boolean = false,
     val vpnMtu: Int = 1500,
 
     // Pro Network Stability (QUIC Guard + Carrier NAT64 IPv4/IPv6 Dial Strategy)
     val blockQuic: Boolean = true,
     val outboundDomainStrategy: String = "AsIs", // AsIs / UseIPv4 / UseIPv6
+    val autoHealthFallback: Boolean = true, // Post-connect HTTP 204 health probe & runtime crash failover in AUTO mode
 
     // Multi-Hop Proxy Chain (optional secondary node ID)
     val chainProfileId: String? = null,
@@ -144,6 +148,8 @@ data class AppSettings(
     val sniffing: SniffingConfig = SniffingConfig(),
     val dns: DnsSettings = DnsSettings(),
     val logLevel: String = "warning", // debug / info / warning / error / none
+    val debugLogEnabledAtMs: Long = 0L,
+    val strictLogRedaction: Boolean = true,
 
     // Split Tunneling
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.ALL_APPS,

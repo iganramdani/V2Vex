@@ -155,6 +155,9 @@ object XrayConfigGenerator {
 
     private fun buildInbounds(settings: AppSettings): JsonArray = buildJsonArray {
         val listenAddr = if (settings.allowLan) "0.0.0.0" else "127.0.0.1"
+        val useLanAuth = settings.allowLan &&
+            settings.lanProxyUsername.isNotBlank() &&
+            settings.lanProxyPassword.isNotBlank()
 
         add(buildJsonObject {
             put("tag", "socks-in")
@@ -162,7 +165,15 @@ object XrayConfigGenerator {
             put("listen", listenAddr)
             put("protocol", "socks")
             putJsonObject("settings") {
-                put("auth", "noauth")
+                put("auth", if (useLanAuth) "password" else "noauth")
+                if (useLanAuth) {
+                    putJsonArray("accounts") {
+                        add(buildJsonObject {
+                            put("user", settings.lanProxyUsername)
+                            put("pass", settings.lanProxyPassword)
+                        })
+                    }
+                }
                 put("udp", true)
             }
             put("sniffing", buildSniffing(settings))
@@ -173,6 +184,16 @@ object XrayConfigGenerator {
             put("port", settings.httpPort)
             put("listen", listenAddr)
             put("protocol", "http")
+            if (useLanAuth) {
+                putJsonObject("settings") {
+                    putJsonArray("accounts") {
+                        add(buildJsonObject {
+                            put("user", settings.lanProxyUsername)
+                            put("pass", settings.lanProxyPassword)
+                        })
+                    }
+                }
+            }
             put("sniffing", buildSniffing(settings))
         })
 

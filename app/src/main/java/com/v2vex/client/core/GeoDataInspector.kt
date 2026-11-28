@@ -47,6 +47,49 @@ object GeoDataInspector {
         return parsed
     }
 
+    /**
+     * Validates comma-separated routing rule tokens against loaded GeoSite/GeoIP tag sets.
+     * Returns a list of unrecognized or mismatched tokens (e.g., unknown geosite:* tag, or geoip:* inside a DOMAIN rule).
+     */
+    fun findInvalidGeoTokens(
+        matchType: com.v2vex.client.model.RuleMatchType,
+        values: String,
+        validGeoSiteTags: Set<String>,
+        validGeoIpTags: Set<String>
+    ): List<String> {
+        val items = values.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val invalid = mutableListOf<String>()
+        items.forEach { item ->
+            val lower = item.lowercase()
+            when (matchType) {
+                com.v2vex.client.model.RuleMatchType.DOMAIN -> {
+                    when {
+                        lower.startsWith("geoip:") -> invalid += "$item (use IP rule)"
+                        lower.startsWith("geosite:") -> {
+                            val tagName = lower.removePrefix("geosite:").substringBefore("@").trim()
+                            if (tagName.isEmpty() || (validGeoSiteTags.isNotEmpty() && tagName !in validGeoSiteTags)) {
+                                invalid += item
+                            }
+                        }
+                    }
+                }
+                com.v2vex.client.model.RuleMatchType.IP -> {
+                    when {
+                        lower.startsWith("geosite:") -> invalid += "$item (use Domain rule)"
+                        lower.startsWith("geoip:") -> {
+                            val tagName = lower.removePrefix("geoip:").trim()
+                            if (tagName.isEmpty() || (validGeoIpTags.isNotEmpty() && tagName !in validGeoIpTags)) {
+                                invalid += item
+                            }
+                        }
+                    }
+                }
+                else -> Unit
+            }
+        }
+        return invalid
+    }
+
     fun loadGeoIpTags(file: File): List<String> {
         if (!file.exists() || file.length() <= 16L) return emptyList()
         val mtime = file.lastModified()
